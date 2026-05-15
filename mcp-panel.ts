@@ -1,826 +1,306 @@
-import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { isToolExcluded } from "./types.ts";
-import type { McpConfig, McpPanelCallbacks, McpPanelResult, ServerProvenance } from "./types.ts";
+import type { McpConfig, McpPanelCallbacks, McpPanelResult, ServerEntry, ServerProvenance } from "./types.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
 import type { MetadataCache, ServerCacheEntry, CachedTool } from "./metadata-cache.ts";
 
-interface PanelTheme {
-  border: string;
-  title: string;
-  selected: string;
-  direct: string;
-  needsAuth: string;
-  placeholder: string;
-  description: string;
-  hint: string;
-  confirm: string;
-  cancel: string;
-}
+type Status = "connected" | "idle" | "failed" | "needs-auth" | "connecting";
+type Item = { type: "add" } | { type: "server"; s: number } | { type: "action"; s: number; action: Action } | { type: "tool"; s: number; t: number };
+type Action = "status" | "authenticate" | "reauthenticate" | "refresh" | "clear-cache" | "tools";
+type Field = "name" | "transport" | "target" | "auth" | "scope" | "lifecycle" | "env";
 
-const DEFAULT_THEME: PanelTheme = {
-  border: "2",
-  title: "2",
-  selected: "36",
-  direct: "32",
-  needsAuth: "33",
-  placeholder: "2;3",
-  description: "2",
-  hint: "2",
-  confirm: "32",
-  cancel: "31",
-};
+const ACTIONS: Action[] = ["status", "authenticate", "reauthenticate", "refresh", "clear-cache", "tools"];
+const FIELDS: Field[] = ["name", "transport", "target", "auth", "env", "scope", "lifecycle"];
+const CSI = "\x1b[";
+const color = (c: string, s: string) => `${CSI}${c}m${s}${CSI}0m`;
+const msg = (e: unknown) => e instanceof Error ? e.message : String(e);
+const score = (q: string, s: string) => !q || s.toLowerCase().includes(q.toLowerCase());
+const tokens = (tool: CachedTool) => Math.ceil((tool.name.length + (tool.description?.length ?? 0) + JSON.stringify(tool.inputSchema ?? {}).length) / 4) + 10;
+const cycle = <T,>(xs: readonly T[], x: T, d: number) => xs[(Math.max(0, xs.indexOf(x)) + d + xs.length) % xs.length]!;
 
-function fg(code: string, text: string): string {
-  if (!code) return text;
-  return `\x1b[${code}m${text}\x1b[0m`;
-}
+interface ToolState { name: string; description: string; direct: boolean; wasDirect: boolean; tokens: number }
+interface ServerState { name: string; source: string; importKind?: string; expanded: boolean; toolsOpen: boolean; status: Status; tools: ToolState[]; cached: boolean; exposeResources: boolean; excludeTools?: string[] }
+interface Draft { name: string; transport: "http" | "stdio"; target: string; auth: "auto" | "oauth" | "none" | "bearer-env"; env: string; scope: "user" | "project"; lifecycle: "lazy" | "eager" | "keep-alive" }
+const newDraft = (): Draft => ({ name: "", transport: "http", target: "", auth: "auto", env: "", scope: "user", lifecycle: "lazy" });
 
-const RAINBOW_COLORS = [
-  "38;2;178;129;214",
-  "38;2;215;135;175",
-  "38;2;254;188;56",
-  "38;2;228;192;15",
-  "38;2;137;210;129",
-  "38;2;0;175;175",
-  "38;2;23;143;185",
-];
-
-function rainbowProgress(filled: number, total: number): string {
-  const dots: string[] = [];
-  for (let i = 0; i < total; i++) {
-    const color = RAINBOW_COLORS[i % RAINBOW_COLORS.length];
-    dots.push(fg(color, i < filled ? "●" : "○"));
+function entryFromDraft(d: Draft): ServerEntry {
+  const parts = d.target.trim().split(/\s+/).filter(Boolean);
+  const entry: ServerEntry = d.transport === "http"
+    ? { url: d.target.trim(), lifecycle: d.lifecycle }
+    : { command: parts[0] ?? "", args: parts.slice(1), lifecycle: d.lifecycle };
+  if (d.auth === "oauth") entry.auth = "oauth";
+  if (d.auth === "none") entry.auth = false;
+  if (d.auth === "bearer-env") {
+    entry.auth = "bearer";
+    entry.bearerTokenEnv = d.env || `${d.name.trim().toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MCP_TOKEN`;
   }
-  return dots.join(" ");
+  return entry;
 }
 
-function fuzzyScore(query: string, text: string): number {
-  const lq = query.toLowerCase();
-  const lt = text.toLowerCase();
-  if (lt.includes(lq)) return 100 + (lq.length / lt.length) * 50;
-  let score = 0;
-  let qi = 0;
-  let consecutive = 0;
-  for (let i = 0; i < lt.length && qi < lq.length; i++) {
-    if (lt[i] === lq[qi]) {
-      score += 10 + consecutive;
-      consecutive += 5;
-      qi++;
-    } else {
-      consecutive = 0;
-    }
-  }
-  return qi === lq.length ? score : 0;
-}
-
-function estimateTokens(tool: CachedTool): number {
-  const schemaLen = JSON.stringify(tool.inputSchema ?? {}).length;
-  const descLen = tool.description?.length ?? 0;
-  return Math.ceil((tool.name.length + descLen + schemaLen) / 4) + 10;
-}
-
-type ConnectionStatus = "connected" | "idle" | "failed" | "needs-auth" | "connecting";
-
-interface ToolState {
-  name: string;
-  description: string;
-  isDirect: boolean;
-  wasDirect: boolean;
-  estimatedTokens: number;
-}
-
-interface ServerState {
-  name: string;
-  expanded: boolean;
-  source: "user" | "project" | "import";
-  importKind?: string;
-  excludeTools?: string[];
-  exposeResources: boolean;
-  connectionStatus: ConnectionStatus;
-  tools: ToolState[];
-  hasCachedData: boolean;
-}
-
-interface VisibleItem {
-  type: "server" | "tool";
-  serverIndex: number;
-  toolIndex?: number;
-}
-
-class McpPanel {
-  private noticeLines: string[];
-  private prefix: "server" | "none" | "short";
+class Panel {
   private servers: ServerState[] = [];
-  private cursorIndex = 0;
-  private nameQuery = "";
-  private descSearchActive = false;
-  private descQuery = "";
+  private items: Item[] = [];
+  private cursor = 0;
+  private query = "";
+  private notice = "";
   private dirty = false;
-  private confirmingDiscard = false;
-  private discardSelected = 1;
-  private importNotice: string | null = null;
-  private authNotice: string | null = null;
-  private authInFlight: string | null = null;
-  private inactivityTimeout: ReturnType<typeof setTimeout> | null = null;
-  private visibleItems: VisibleItem[] = [];
-  private tui: { requestRender(): void };
-  private t = DEFAULT_THEME;
-  private authOnly: boolean;
-
-  private static readonly MAX_VISIBLE = 12;
-  private static readonly INACTIVITY_MS = 60_000;
+  private confirmDiscard = false;
+  private authInFlight = new Set<string>();
+  private addMode = false;
+  private draft = newDraft();
+  private field = 0;
+  private timer?: ReturnType<typeof setTimeout>;
+  private prefix: "server" | "none" | "short";
 
   constructor(
     config: McpConfig,
     cache: MetadataCache | null,
     provenance: Map<string, ServerProvenance>,
     private callbacks: McpPanelCallbacks,
-    tui: { requestRender(): void },
+    private tui: { requestRender(): void },
     private done: (result: McpPanelResult) => void,
-    options: { noticeLines?: string[]; authOnly?: boolean } = {},
+    private opts: { noticeLines?: string[]; authOnly?: boolean } = {},
   ) {
-    this.tui = tui;
-    this.noticeLines = options.noticeLines ?? [];
-    this.authOnly = options.authOnly === true;
     this.prefix = config.settings?.toolPrefix ?? "server";
-
-    for (const [serverName, definition] of Object.entries(config.mcpServers)) {
-      if (this.authOnly && !callbacks.canAuthenticate(serverName)) continue;
-      const prov = provenance.get(serverName);
-      const serverCache = cache?.servers?.[serverName];
-
-      const globalDirect = config.settings?.directTools;
-      let toolFilter: true | string[] | false = false;
-      if (definition.directTools !== undefined) {
-        toolFilter = definition.directTools;
-      } else if (globalDirect) {
-        toolFilter = globalDirect;
-      }
-
+    for (const [name, def] of Object.entries(config.mcpServers)) {
+      if (opts.authOnly && !callbacks.canAuthenticate(name)) continue;
+      const prov = provenance.get(name);
+      const sc = cache?.servers?.[name];
+      const directCfg = def.directTools ?? config.settings?.directTools ?? false;
       const tools: ToolState[] = [];
-      if (serverCache && !this.authOnly) {
-        for (const tool of serverCache.tools ?? []) {
-          if (isToolExcluded(tool.name, serverName, this.prefix, definition.excludeTools)) {
-            continue;
-          }
-
-          const isDirect = toolFilter === true || (Array.isArray(toolFilter) && toolFilter.includes(tool.name));
-          tools.push({
-            name: tool.name,
-            description: tool.description ?? "",
-            isDirect,
-            wasDirect: isDirect,
-            estimatedTokens: estimateTokens(tool),
-          });
+      if (sc && !opts.authOnly) {
+        for (const tool of sc.tools ?? []) if (!isToolExcluded(tool.name, name, this.prefix, def.excludeTools)) {
+          const direct = directCfg === true || (Array.isArray(directCfg) && directCfg.includes(tool.name));
+          tools.push({ name: tool.name, description: tool.description ?? "", direct, wasDirect: direct, tokens: tokens(tool) });
         }
-        if (definition.exposeResources !== false) {
-          for (const resource of serverCache.resources ?? []) {
-            const baseName = `get_${resourceNameToToolName(resource.name)}`;
-            if (isToolExcluded(baseName, serverName, this.prefix, definition.excludeTools)) {
-              continue;
-            }
-
-            const isDirect = toolFilter === true || (Array.isArray(toolFilter) && toolFilter.includes(baseName));
-            const ct: CachedTool = { name: baseName, description: resource.description };
-            tools.push({
-              name: baseName,
-              description: resource.description ?? `Read resource: ${resource.uri}`,
-              isDirect,
-              wasDirect: isDirect,
-              estimatedTokens: estimateTokens(ct),
-            });
-          }
+        if (def.exposeResources !== false) for (const resource of sc.resources ?? []) {
+          const toolName = `get_${resourceNameToToolName(resource.name)}`;
+          if (isToolExcluded(toolName, name, this.prefix, def.excludeTools)) continue;
+          const direct = directCfg === true || (Array.isArray(directCfg) && directCfg.includes(toolName));
+          tools.push({ name: toolName, description: resource.description ?? `Read resource: ${resource.uri}`, direct, wasDirect: direct, tokens: tokens({ name: toolName, description: resource.description }) });
         }
       }
-
-      const status = callbacks.getConnectionStatus(serverName);
-
-      this.servers.push({
-        name: serverName,
-        expanded: false,
-        source: prov?.kind ?? "user",
-        importKind: prov?.importKind,
-        excludeTools: definition.excludeTools,
-        exposeResources: definition.exposeResources !== false,
-        connectionStatus: status,
-        tools,
-        hasCachedData: !!serverCache,
-      });
+      this.servers.push({ name, source: prov?.kind ?? "user", importKind: prov?.importKind, expanded: false, toolsOpen: true, status: callbacks.getConnectionStatus(name), tools, cached: !!sc, exposeResources: def.exposeResources !== false, excludeTools: def.excludeTools });
     }
-
-    this.rebuildVisibleItems();
-    this.resetInactivityTimeout();
+    this.rebuild();
+    this.armTimer();
   }
 
-  private resetInactivityTimeout(): void {
-    if (this.inactivityTimeout) clearTimeout(this.inactivityTimeout);
-    this.inactivityTimeout = setTimeout(() => {
-      this.cleanup();
-      this.done({ cancelled: true, changes: new Map() });
-    }, McpPanel.INACTIVITY_MS);
+  private armTimer() {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.close(true), 60_000);
+    this.timer.unref?.();
   }
+  dispose() { if (this.timer) clearTimeout(this.timer); }
+  invalidate() { this.rebuild(); }
+  private close(cancelled = false, addedServer?: string) { this.dispose(); this.done(cancelled ? { cancelled, changes: new Map() } : { ...this.result(), addedServer }); }
 
-  private cleanup(): void {
-    if (this.inactivityTimeout) {
-      clearTimeout(this.inactivityTimeout);
-      this.inactivityTimeout = null;
-    }
-  }
-
-  private rebuildVisibleItems(): void {
-    const query = this.descSearchActive ? this.descQuery : this.nameQuery;
-    const mode = this.descSearchActive ? "desc" : "name";
-
-    this.visibleItems = [];
-    for (let si = 0; si < this.servers.length; si++) {
-      const server = this.servers[si];
-      if (query && this.authOnly) {
-        const score = mode === "name" ? fuzzyScore(query, server.name) : 0;
-        if (score > 0) {
-          this.visibleItems.push({ type: "server", serverIndex: si });
-        }
-        continue;
-      }
-
-      this.visibleItems.push({ type: "server", serverIndex: si });
-      if (server.expanded || query) {
-        for (let ti = 0; ti < server.tools.length; ti++) {
-          const tool = server.tools[ti];
-          if (query) {
-            const score = mode === "name"
-              ? Math.max(
-                  fuzzyScore(query, tool.name),
-                  fuzzyScore(query, server.name) * 0.6,
-                )
-              : fuzzyScore(query, tool.description);
-            if (score === 0) continue;
-          }
-          this.visibleItems.push({ type: "tool", serverIndex: si, toolIndex: ti });
-        }
+  private rebuild() {
+    this.items = [];
+    for (let s = 0; s < this.servers.length; s++) {
+      const server = this.servers[s]!;
+      const matchingTools = server.tools.map((tool, t) => ({ tool, t })).filter(({ tool }) => score(this.query, tool.name) || score(this.query, tool.description));
+      if (!this.query || score(this.query, server.name) || matchingTools.length > 0) this.items.push({ type: "server", s });
+      if (this.query) for (const { t } of matchingTools) this.items.push({ type: "tool", s, t });
+      else if (server.expanded && !this.opts.authOnly) {
+        for (const action of ACTIONS) this.items.push({ type: "action", s, action });
+        if (server.toolsOpen) for (let t = 0; t < server.tools.length; t++) this.items.push({ type: "tool", s, t });
       }
     }
-
-    if (query && !this.authOnly) {
-      this.visibleItems = this.visibleItems.filter((item) => {
-        if (item.type === "server") {
-          return this.visibleItems.some(
-            (other) => other.type === "tool" && other.serverIndex === item.serverIndex,
-          );
-        }
-        return true;
-      });
-    }
+    if (!this.opts.authOnly && !this.query && this.callbacks.addServer) this.items.push({ type: "add" });
+    this.cursor = Math.min(this.cursor, Math.max(0, this.items.length - 1));
   }
 
-  private updateDirty(): void {
-    this.dirty = this.servers.some((s) => s.tools.some((t) => t.isDirect !== t.wasDirect));
-  }
-
-  private buildResult(): McpPanelResult {
+  private result(): McpPanelResult {
     const changes = new Map<string, true | string[] | false>();
     for (const server of this.servers) {
-      const changed = server.tools.some((t) => t.isDirect !== t.wasDirect);
-      if (!changed) continue;
-      const directTools = server.tools.filter((t) => t.isDirect);
-      if (directTools.length === server.tools.length && server.tools.length > 0) {
-        changes.set(server.name, true);
-      } else if (directTools.length === 0) {
-        changes.set(server.name, false);
-      } else {
-        changes.set(server.name, directTools.map((t) => t.name));
-      }
+      if (!server.tools.some(t => t.direct !== t.wasDirect)) continue;
+      const direct = server.tools.filter(t => t.direct).map(t => t.name);
+      changes.set(server.name, direct.length === server.tools.length && direct.length > 0 ? true : direct.length ? direct : false);
     }
-    return { changes, cancelled: false };
+    return { cancelled: false, changes };
   }
+  private updateDirty() { this.dirty = this.servers.some(s => s.tools.some(t => t.direct !== t.wasDirect)); }
 
-  handleInput(data: string): void {
-    this.resetInactivityTimeout();
-    this.importNotice = null;
-    if (!this.authInFlight) this.authNotice = null;
-
-    if (this.confirmingDiscard) {
-      this.handleDiscardInput(data);
-      return;
-    }
-
-    // Global shortcuts — always work, even during desc search
-    if (matchesKey(data, "ctrl+c")) {
-      this.cleanup();
-      this.done({ cancelled: true, changes: new Map() });
-      return;
-    }
-
-    if (matchesKey(data, "ctrl+s")) {
-      this.cleanup();
-      this.done(this.buildResult());
-      return;
-    }
-
-    // Modal description search mode
-    if (this.descSearchActive) {
-      if (matchesKey(data, "escape") || matchesKey(data, "return")) {
-        this.descSearchActive = false;
-        this.descQuery = "";
-        this.rebuildVisibleItems();
-        this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
-        return;
-      }
-      if (matchesKey(data, "backspace")) {
-        if (this.descQuery.length > 0) {
-          this.descQuery = this.descQuery.slice(0, -1);
-          this.rebuildVisibleItems();
-          this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
-        }
-        return;
-      }
-      if (matchesKey(data, "up")) { this.moveCursor(-1); return; }
-      if (matchesKey(data, "down")) { this.moveCursor(1); return; }
-      if (matchesKey(data, "space")) {
-        // Toggle even while in desc search
-        const item = this.visibleItems[this.cursorIndex];
-        if (item) this.toggleItem(item);
-        return;
-      }
-      if (data.length === 1 && data.charCodeAt(0) >= 32) {
-        this.descQuery += data;
-        this.rebuildVisibleItems();
-        this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
-        return;
-      }
-      return;
-    }
-
+  handleInput(data: string) {
+    this.armTimer();
+    if (this.addMode) return this.handleAdd(data);
+    if (this.confirmDiscard) return this.handleDiscard(data);
+    if (matchesKey(data, "ctrl+c")) return this.close(true);
+    if (matchesKey(data, "ctrl+s")) return this.close(false);
     if (matchesKey(data, "escape")) {
-      if (this.nameQuery) {
-        this.nameQuery = "";
-        this.rebuildVisibleItems();
-        this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
-        return;
-      }
-      if (this.dirty) {
-        this.confirmingDiscard = true;
-        this.discardSelected = 1;
-        return;
-      }
-      this.cleanup();
-      this.done({ cancelled: true, changes: new Map() });
-      return;
+      if (this.query) { this.query = ""; this.rebuild(); return; }
+      if (this.dirty) { this.confirmDiscard = true; return; }
+      return this.close(true);
     }
-
-    if (matchesKey(data, "up")) { this.moveCursor(-1); return; }
-    if (matchesKey(data, "down")) { this.moveCursor(1); return; }
-
-    if (matchesKey(data, "space")) {
-      const item = this.visibleItems[this.cursorIndex];
-      if (item && !this.authOnly) this.toggleItem(item);
-      return;
-    }
-
-    if (matchesKey(data, "return")) {
-      const item = this.visibleItems[this.cursorIndex];
-      if (!item) return;
-      const server = this.servers[item.serverIndex];
-      if (item.type === "server") {
-        if (this.authOnly || server.connectionStatus === "needs-auth") {
-          this.authenticateServer(server);
-          return;
-        }
-        server.expanded = !server.expanded;
-        this.rebuildVisibleItems();
-        this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
-      } else if (item.toolIndex !== undefined) {
-        const tool = server.tools[item.toolIndex];
-        tool.isDirect = !tool.isDirect;
-        if (tool.isDirect && server.source === "import") {
-          this.importNotice = `Imported from ${server.importKind ?? "external"} — will copy to user config on save`;
-        }
-        this.updateDirty();
-      }
-      return;
-    }
-
-    if (matchesKey(data, "ctrl+a")) {
-      const item = this.visibleItems[this.cursorIndex];
-      if (item) this.authenticateSelectedServer(item);
-      return;
-    }
-
-    if (matchesKey(data, "ctrl+r")) {
-      const item = this.visibleItems[this.cursorIndex];
-      if (!item) return;
-      const server = this.servers[item.serverIndex];
-      if (server.connectionStatus === "connecting") return;
-      server.connectionStatus = "connecting";
-      this.callbacks.reconnect(server.name).then(() => {
-        server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
-        if (server.connectionStatus === "connected") {
-          const entry = this.callbacks.refreshCacheAfterReconnect(server.name);
-          if (entry) {
-            this.rebuildServerTools(server, entry);
-          }
-          server.hasCachedData = true;
-        }
-        this.tui.requestRender();
-      }).catch((error) => {
-        server.connectionStatus = "failed";
-        const message = error instanceof Error ? error.message : String(error);
-        this.authNotice = `Reconnect failed for ${server.name}: ${message}`;
-        this.tui.requestRender();
-      });
-      return;
-    }
-
-    if (data === "?") {
-      if (this.authOnly) return;
-      this.descSearchActive = true;
-      this.descQuery = "";
-      this.rebuildVisibleItems();
-      this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
-      return;
-    }
-
-    // Backspace removes from name query
-    if (matchesKey(data, "backspace")) {
-      if (this.nameQuery.length > 0) {
-        this.nameQuery = this.nameQuery.slice(0, -1);
-        this.rebuildVisibleItems();
-        this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
-      }
-      return;
-    }
-
-    // All other printable chars → always-on name search
-    if (data.length === 1 && data.charCodeAt(0) >= 32) {
-      this.nameQuery += data;
-      this.rebuildVisibleItems();
-      this.cursorIndex = Math.min(this.cursorIndex, Math.max(0, this.visibleItems.length - 1));
-      return;
-    }
+    if (matchesKey(data, "up")) { this.cursor = Math.max(0, this.cursor - 1); return; }
+    if (matchesKey(data, "down")) { this.cursor = Math.min(Math.max(0, this.items.length - 1), this.cursor + 1); return; }
+    if ((data === "a" || data === "A") && !this.opts.authOnly && this.callbacks.addServer) { this.addMode = true; this.draft = newDraft(); this.field = 0; this.tui.requestRender(); return; }
+    if (matchesKey(data, "space")) return this.toggle(this.items[this.cursor]);
+    if (matchesKey(data, "return")) return this.activate(this.items[this.cursor]);
+    if (matchesKey(data, "ctrl+a")) return this.authFor(this.items[this.cursor], false);
+    if (matchesKey(data, "ctrl+r")) return this.refreshFor(this.items[this.cursor]);
+    if (data === "?" && this.opts.authOnly) return;
+    if (matchesKey(data, "backspace")) { this.query = this.query.slice(0, -1); this.rebuild(); return; }
+    if (data.length === 1 && data.charCodeAt(0) >= 32) { this.query += data; this.rebuild(); }
   }
 
-  private authenticateSelectedServer(item: VisibleItem): void {
-    this.authenticateServer(this.servers[item.serverIndex]);
+  private activate(item?: Item) {
+    if (!item) return;
+    if (item.type === "add") { this.addMode = true; this.draft = newDraft(); this.field = 0; return; }
+    const server = this.servers[item.s]!;
+    if (item.type === "server") {
+      if (server.status === "connecting") return;
+      if (this.opts.authOnly || server.status === "needs-auth") return this.authenticate(server, false);
+      server.expanded = !server.expanded; server.toolsOpen = true; this.rebuild(); return;
+    }
+    if (item.type === "tool") { const tool = server.tools[item.t]; if (tool) this.notice = `${server.name}/${tool.name}: Space toggles direct, ctrl+s saves.`; return; }
+    if (item.action === "status") { server.status = this.callbacks.getConnectionStatus(server.name); this.notice = `${server.name}: ${this.statusText(server)}`; return; }
+    if (item.action === "authenticate") return this.authenticate(server, false);
+    if (item.action === "reauthenticate") return this.authenticate(server, true);
+    if (item.action === "refresh") return this.refresh(server);
+    if (item.action === "clear-cache") return this.clear(server);
+    server.toolsOpen = !server.toolsOpen; this.rebuild();
   }
 
-  private authenticateServer(server: ServerState): void {
-    if (this.authInFlight) return;
-    if (!this.callbacks.canAuthenticate(server.name)) {
-      this.authNotice = `${server.name} does not use OAuth authentication.`;
-      return;
+  private toggle(item?: Item) {
+    if (!item || this.opts.authOnly) return;
+    const server = item.type === "server" || item.type === "tool" ? this.servers[item.s]! : undefined;
+    if (!server) return;
+    if (item.type === "server") {
+      const next = !server.tools.every(t => t.direct);
+      for (const tool of server.tools) tool.direct = next;
+    } else if (item.type === "tool") {
+      const tool = server.tools[item.t]; if (tool) tool.direct = !tool.direct;
     }
+    this.updateDirty();
+  }
 
-    this.authInFlight = server.name;
-    this.authNotice = `Authenticating ${server.name}...`;
-    this.tui.requestRender();
-
-    this.callbacks.authenticate(server.name).then((result) => {
-      server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
-      this.authNotice = result.ok
-        ? `OAuth finished for ${server.name}. Run reconnect if it is still idle.`
-        : `OAuth failed for ${server.name}${result.message ? `: ${result.message}` : ". Check the notification for details."}`;
-      this.authInFlight = null;
+  private authFor(item: Item | undefined, reauth: boolean) { if (item && item.type !== "add") this.authenticate(this.servers[item.s]!, reauth); }
+  private refreshFor(item?: Item) { if (item && item.type !== "add") this.refresh(this.servers[item.s]!); }
+  private authenticate(server: ServerState, reauth: boolean) {
+    if (this.authInFlight.has(server.name)) return;
+    if (!this.callbacks.canAuthenticate(server.name)) { this.notice = `${server.name} is not OAuth-capable.`; return; }
+    this.authInFlight.add(server.name);
+    server.status = "connecting"; this.notice = `${reauth ? "Re-authenticating" : "Authenticating"} ${server.name}...`; this.tui.requestRender();
+    const p = reauth
+      ? (this.callbacks.reauthenticate?.(server.name) ?? this.callbacks.authenticate(server.name))
+      : this.callbacks.authenticate(server.name);
+    p.then(r => {
+      server.status = this.callbacks.getConnectionStatus(server.name);
+      this.notice = r.ok ? `OAuth finished for ${server.name}` : `OAuth failed for ${server.name}: ${r.message ?? "unknown error"}`;
+      this.authInFlight.delete(server.name);
       this.tui.requestRender();
-    }).catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      server.connectionStatus = this.callbacks.getConnectionStatus(server.name);
-      this.authNotice = `OAuth failed for ${server.name}: ${message}`;
-      this.authInFlight = null;
+    }).catch(e => {
+      server.status = this.callbacks.getConnectionStatus(server.name);
+      this.notice = `OAuth failed for ${server.name}: ${msg(e)}`;
+      this.authInFlight.delete(server.name);
       this.tui.requestRender();
     });
   }
-
-  private toggleItem(item: VisibleItem): void {
-    if (this.authOnly) return;
-    const server = this.servers[item.serverIndex];
-    if (item.type === "server") {
-      const newState = !server.tools.every((t) => t.isDirect);
-      if (server.source === "import" && newState) {
-        this.importNotice = `Imported from ${server.importKind ?? "external"} — will copy to user config on save`;
-      }
-      for (const t of server.tools) t.isDirect = newState;
-    } else if (item.toolIndex !== undefined) {
-      const tool = server.tools[item.toolIndex];
-      tool.isDirect = !tool.isDirect;
-      if (tool.isDirect && server.source === "import") {
-        this.importNotice = `Imported from ${server.importKind ?? "external"} — will copy to user config on save`;
-      }
+  private refresh(server: ServerState) {
+    server.status = "connecting"; this.notice = `Refreshing ${server.name}...`; this.tui.requestRender();
+    this.callbacks.reconnect(server.name).then(() => {
+      server.status = this.callbacks.getConnectionStatus(server.name);
+      const entry = this.callbacks.refreshCacheAfterReconnect(server.name);
+      if (entry) this.rebuildTools(server, entry);
+      server.cached = !!entry; this.notice = `${server.name}: ${this.statusText(server)}`; this.tui.requestRender();
+    }).catch(e => { server.status = "failed"; this.notice = `${server.name}: ${msg(e)}`; this.tui.requestRender(); });
+  }
+  private clear(server: ServerState) {
+    if (!this.callbacks.clearServerCache) { this.notice = "Clear cache is unavailable."; return; }
+    this.callbacks.clearServerCache(server.name).then(removed => { server.tools = []; server.cached = false; this.updateDirty(); this.rebuild(); this.notice = removed ? `${server.name}: cache cleared.` : `${server.name}: no cache entry.`; this.tui.requestRender(); })
+      .catch(e => { this.notice = `${server.name}: ${msg(e)}`; this.tui.requestRender(); });
+  }
+  private rebuildTools(server: ServerState, entry: ServerCacheEntry) {
+    server.tools = [];
+    for (const tool of entry.tools ?? []) if (!isToolExcluded(tool.name, server.name, this.prefix, server.excludeTools)) server.tools.push({ name: tool.name, description: tool.description ?? "", direct: false, wasDirect: false, tokens: tokens(tool) });
+    if (server.exposeResources) for (const resource of entry.resources ?? []) {
+      const name = `get_${resourceNameToToolName(resource.name)}`;
+      if (!isToolExcluded(name, server.name, this.prefix, server.excludeTools)) server.tools.push({ name, description: resource.description ?? `Read resource: ${resource.uri}`, direct: false, wasDirect: false, tokens: tokens({ name, description: resource.description }) });
     }
-    this.updateDirty();
+    this.rebuild();
   }
 
-  private handleDiscardInput(data: string): void {
-    if (matchesKey(data, "ctrl+c")) {
-      this.cleanup();
-      this.done({ cancelled: true, changes: new Map() });
-      return;
-    }
-    if (matchesKey(data, "escape") || data === "n" || data === "N") {
-      this.confirmingDiscard = false;
-      return;
-    }
-    if (matchesKey(data, "return")) {
-      if (this.discardSelected === 0) {
-        this.cleanup();
-        this.done({ cancelled: true, changes: new Map() });
-      } else {
-        this.confirmingDiscard = false;
-      }
-      return;
-    }
-    if (data === "y" || data === "Y") {
-      this.cleanup();
-      this.done({ cancelled: true, changes: new Map() });
-      return;
-    }
-    if (matchesKey(data, "left") || matchesKey(data, "right") || matchesKey(data, "tab")) {
-      this.discardSelected = this.discardSelected === 0 ? 1 : 0;
-    }
+  private handleDiscard(data: string) { if (matchesKey(data, "return") || data === "y" || data === "Y") this.close(true); else if (matchesKey(data, "escape") || data === "n" || data === "N") this.confirmDiscard = false; }
+  private handleAdd(data: string) {
+    const field = FIELDS[this.field]!;
+    if (matchesKey(data, "ctrl+c")) return this.close(true);
+    if (matchesKey(data, "escape")) { this.addMode = false; this.notice = ""; return; }
+    if (matchesKey(data, "up")) { this.field = Math.max(0, this.field - 1); return; }
+    if (matchesKey(data, "down") || matchesKey(data, "tab")) { this.field = Math.min(FIELDS.length - 1, this.field + 1); return; }
+    if (matchesKey(data, "left") || matchesKey(data, "right")) { this.cycleField(field, matchesKey(data, "right") ? 1 : -1); return; }
+    if (matchesKey(data, "backspace")) { if (field === "name") this.draft.name = this.draft.name.slice(0, -1); if (field === "target") this.draft.target = this.draft.target.slice(0, -1); if (field === "env") this.draft.env = this.draft.env.slice(0, -1); return; }
+    if (matchesKey(data, "return")) { if (this.field < FIELDS.length - 1) { this.field++; return; } return this.submitAdd(); }
+    if (data.length === 1 && data.charCodeAt(0) >= 32) { if (field === "name") this.draft.name += data; if (field === "target") this.draft.target += data; if (field === "env") this.draft.env += data; }
+  }
+  private cycleField(field: Field, d: number) {
+    if (field === "transport") this.draft.transport = cycle(["http", "stdio"], this.draft.transport, d);
+    if (field === "auth") this.draft.auth = cycle(["auto", "oauth", "none", "bearer-env"], this.draft.auth, d);
+    if (field === "scope") this.draft.scope = cycle(["user", "project"], this.draft.scope, d);
+    if (field === "lifecycle") this.draft.lifecycle = cycle(["lazy", "eager", "keep-alive"], this.draft.lifecycle, d);
+  }
+  private submitAdd() {
+    const name = this.draft.name.trim();
+    if (!this.callbacks.addServer) { this.notice = "Add server is unavailable."; return; }
+    if (!/^[A-Za-z0-9_.-]+$/.test(name)) { this.notice = "Invalid server name."; return; }
+    if (!this.draft.target.trim()) { this.notice = "Target is required."; return; }
+    const entry = entryFromDraft(this.draft);
+    if (this.draft.transport === "stdio" && !entry.command) { this.notice = "Command is required."; return; }
+    this.callbacks.addServer(name, entry, this.draft.scope).then(() => this.close(false, name)).catch(e => { this.notice = msg(e); this.tui.requestRender(); });
   }
 
-  private moveCursor(delta: number): void {
-    if (this.visibleItems.length === 0) return;
-    this.cursorIndex = Math.max(0, Math.min(this.visibleItems.length - 1, this.cursorIndex + delta));
-  }
-
-  private rebuildServerTools(server: ServerState, entry: ServerCacheEntry): void {
-    const existingState = new Map<string, boolean>();
-    for (const t of server.tools) existingState.set(t.name, t.isDirect);
-
-    const newTools: ToolState[] = [];
-    for (const tool of entry.tools ?? []) {
-      if (isToolExcluded(tool.name, server.name, this.prefix, server.excludeTools)) {
-        continue;
-      }
-
-      const prev = existingState.get(tool.name);
-      const isDirect = prev !== undefined ? prev : false;
-      newTools.push({
-        name: tool.name,
-        description: tool.description ?? "",
-        isDirect,
-        wasDirect: prev !== undefined ? server.tools.find((t) => t.name === tool.name)?.wasDirect ?? false : false,
-        estimatedTokens: estimateTokens(tool),
-      });
-    }
-
-    if (server.exposeResources) {
-      for (const resource of entry.resources ?? []) {
-        const baseName = `get_${resourceNameToToolName(resource.name)}`;
-        if (isToolExcluded(baseName, server.name, this.prefix, server.excludeTools)) {
-          continue;
-        }
-
-        const prev = existingState.get(baseName);
-        const isDirect = prev !== undefined ? prev : false;
-        const ct: CachedTool = { name: baseName, description: resource.description };
-        newTools.push({
-          name: baseName,
-          description: resource.description ?? `Read resource: ${resource.uri}`,
-          isDirect,
-          wasDirect: prev !== undefined ? server.tools.find((t) => t.name === baseName)?.wasDirect ?? false : false,
-          estimatedTokens: estimateTokens(ct),
-        });
-      }
-    }
-
-    server.tools = newTools;
-    this.rebuildVisibleItems();
-    this.updateDirty();
-  }
+  private statusText(server: ServerState) { return server.status === "connected" ? `connected (${server.tools.length} tools)` : server.status === "needs-auth" ? "needs auth" : server.status; }
 
   render(width: number): string[] {
-    const innerW = width - 2;
-    const lines: string[] = [];
-    const t = this.t;
-    const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
-    const italic = (s: string) => `\x1b[3m${s}\x1b[23m`;
-    const inverse = (s: string) => `\x1b[7m${s}\x1b[27m`;
-
-    const row = (content: string) =>
-      fg(t.border, "│") + truncateToWidth(" " + content, innerW, "…", true) + fg(t.border, "│");
-    const emptyRow = () => fg(t.border, "│") + " ".repeat(innerW) + fg(t.border, "│");
-    const divider = () => fg(t.border, "├" + "─".repeat(innerW) + "┤");
-
-    const titleText = this.authOnly ? " MCP OAuth " : " MCP Servers ";
-    const borderLen = innerW - visibleWidth(titleText);
-    const leftB = Math.floor(borderLen / 2);
-    const rightB = borderLen - leftB;
-    lines.push(fg(t.border, "╭" + "─".repeat(leftB)) + fg(t.title, titleText) + fg(t.border, "─".repeat(rightB) + "╮"));
-
-    lines.push(emptyRow());
-
-    const cursor = fg(t.selected, "│");
-    const searchIcon = fg(t.border, "◎");
-    if (this.descSearchActive) {
-      lines.push(row(`${searchIcon}  ${fg(t.needsAuth, "desc:")} ${this.descQuery}${cursor}`));
-    } else if (this.nameQuery) {
-      lines.push(row(`${searchIcon}  ${this.nameQuery}${cursor}`));
-    } else {
-      lines.push(row(`${searchIcon}  ${fg(t.placeholder, italic("search..."))}`));
-    }
-
-    lines.push(emptyRow());
-    if (this.noticeLines.length > 0) {
-      for (const notice of this.noticeLines) {
-        lines.push(row(fg(t.hint, italic(notice))));
-      }
-      lines.push(emptyRow());
-    }
-    lines.push(divider());
-
-    if (this.servers.length === 0) {
-      lines.push(emptyRow());
-      lines.push(row(fg(t.hint, italic(this.authOnly ? "No OAuth-capable MCP servers configured." : "No MCP servers configured."))));
-      lines.push(emptyRow());
-    } else {
-      const maxVis = McpPanel.MAX_VISIBLE;
-      const total = this.visibleItems.length;
-      const startIdx = Math.max(0, Math.min(this.cursorIndex - Math.floor(maxVis / 2), total - maxVis));
-      const endIdx = Math.min(startIdx + maxVis, total);
-
-      lines.push(emptyRow());
-
-      for (let i = startIdx; i < endIdx; i++) {
-        const item = this.visibleItems[i];
-        const isCursor = i === this.cursorIndex;
-        const server = this.servers[item.serverIndex];
-
-        if (item.type === "server") {
-          lines.push(row(this.renderServerRow(server, isCursor)));
-        } else if (item.toolIndex !== undefined) {
-          lines.push(row(this.renderToolRow(server.tools[item.toolIndex], isCursor, innerW)));
-        }
-      }
-
-      lines.push(emptyRow());
-
-      if (total > maxVis) {
-        const prog = Math.round(((this.cursorIndex + 1) / total) * 10);
-        lines.push(row(`${rainbowProgress(prog, 10)}  ${fg(t.hint, `${this.cursorIndex + 1}/${total}`)}`));
-        lines.push(emptyRow());
-      }
-
-      if (this.importNotice) {
-        lines.push(row(fg(t.needsAuth, italic(this.importNotice))));
-        lines.push(emptyRow());
-      }
-      if (this.authNotice) {
-        lines.push(row(fg(t.needsAuth, italic(this.authNotice))));
-        lines.push(emptyRow());
-      }
-    }
-
-    lines.push(divider());
-    lines.push(emptyRow());
-
-    if (this.confirmingDiscard) {
-      const discardBtn = this.discardSelected === 0
-        ? inverse(bold(fg(t.cancel, "  Discard  ")))
-        : fg(t.hint, "  Discard  ");
-      const keepBtn = this.discardSelected === 1
-        ? inverse(bold(fg(t.confirm, "  Keep  ")))
-        : fg(t.hint, "  Keep  ");
-      lines.push(row(`Discard unsaved changes?  ${discardBtn}   ${keepBtn}`));
-    } else {
-      if (this.authOnly) {
-        lines.push(row(fg(t.description, "select a server to authenticate")));
-      } else {
-        const directCount = this.servers.reduce((sum, s) => sum + s.tools.filter((t) => t.isDirect).length, 0);
-        const totalTokens = this.servers.reduce(
-          (sum, s) => sum + s.tools.filter((t) => t.isDirect).reduce((ts, t) => ts + t.estimatedTokens, 0),
-          0,
-        );
-        const stats =
-          directCount > 0 ? `${directCount} direct  ~${totalTokens.toLocaleString()} tokens` : "no direct tools";
-        lines.push(row(fg(t.description, stats + (this.dirty ? fg(t.needsAuth, "  (unsaved)") : ""))));
-      }
-    }
-
-    lines.push(emptyRow());
-    const hints = this.authOnly
-      ? [
-          italic("↑↓") + " navigate",
-          italic("⏎") + " auth",
-          italic("ctrl+a") + " auth",
-          italic("esc") + " clear/close",
-          italic("ctrl+c") + " quit",
-        ]
-      : [
-          italic("↑↓") + " navigate",
-          italic("space") + " toggle",
-          italic("⏎") + " expand/auth",
-          italic("ctrl+a") + " auth",
-          italic("ctrl+r") + " reconnect",
-          italic("?") + " desc search",
-          italic("ctrl+s") + " save",
-          italic("esc") + " clear/close",
-          italic("ctrl+c") + " quit",
-        ];
-    const gap = "  ";
-    const gapW = 2;
-    const maxW = innerW - 2;
-    let curLine = "";
-    let curW = 0;
-    for (const hint of hints) {
-      const hw = visibleWidth(hint);
-      const needed = curW === 0 ? hw : gapW + hw;
-      if (curW > 0 && curW + needed > maxW) {
-        lines.push(row(fg(t.hint, curLine)));
-        curLine = hint;
-        curW = hw;
-      } else {
-        curLine += (curW > 0 ? gap : "") + hint;
-        curW += needed;
-      }
-    }
-    if (curLine) lines.push(row(fg(t.hint, curLine)));
-
-    lines.push(fg(t.border, "╰" + "─".repeat(innerW) + "╯"));
-
-    return lines;
+    const w = Math.max(30, width - 2);
+    const row = (s = "") => color("2", "│") + truncateToWidth(" " + s, w, "…", true) + color("2", "│");
+    const out = [color("2", "╭" + "─".repeat(w) + "╮")];
+    out.push(row(color("1", this.addMode ? "Add MCP Server" : this.opts.authOnly ? "MCP OAuth" : "MCP Servers")));
+    for (const line of this.opts.noticeLines ?? []) out.push(row(color("2", line)));
+    if (this.notice) out.push(row(color("33", this.notice)));
+    if (this.confirmDiscard) { out.push(row(color("31", "Discard unsaved changes? Enter=yes Esc=no"))); out.push(color("2", "╰" + "─".repeat(w) + "╯")); return out; }
+    if (this.addMode) return this.renderAdd(out, row, w);
+    out.push(row(this.query ? `Search: ${this.query}` : color("2;3", "Type to search · a add server · Enter expand/action · Space toggle direct")));
+    const start = Math.max(0, Math.min(this.cursor - 6, this.items.length - 12));
+    const end = Math.min(this.items.length, start + 12);
+    for (let i = start; i < end; i++) out.push(row((i === this.cursor ? color("7", this.itemLabel(this.items[i]!)) : this.itemLabel(this.items[i]!))));
+    const direct = this.servers.reduce((n, s) => n + s.tools.filter(t => t.direct).length, 0);
+    const toks = this.servers.reduce((n, s) => n + s.tools.filter(t => t.direct).reduce((a, t) => a + t.tokens, 0), 0);
+    out.push(row(`Direct: ${direct} tools · ~${toks} tokens${this.dirty ? color("33", " · unsaved") : ""}`));
+    out.push(row(color("2", "ctrl+a auth · ctrl+r refresh · ctrl+s save · Esc close")));
+    out.push(color("2", "╰" + "─".repeat(w) + "╯"));
+    return out;
   }
-
-  private renderServerRow(server: ServerState, isCursor: boolean): string {
-    const t = this.t;
-    const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
-
-    const expandIcon = server.expanded ? "▾" : "▸";
-    const prefix = isCursor ? fg(t.selected, expandIcon) : fg(t.border, server.expanded ? expandIcon : "·");
-
-    const nameStr = isCursor ? bold(fg(t.selected, server.name)) : server.name;
-    const importLabel = server.source === "import" ? fg(t.description, ` (${server.importKind ?? "import"})`) : "";
-    const statusLabel = this.renderConnectionStatus(server);
-
-    if (!server.hasCachedData && !this.authOnly) {
-      return `${prefix}   ${nameStr}${importLabel}  ${fg(t.description, "(not cached)")}${statusLabel}`;
-    }
-
-    const directCount = server.tools.filter((t) => t.isDirect).length;
-    const totalCount = server.tools.length;
-    let toggleIcon = fg(t.description, "○");
-    if (directCount === totalCount && totalCount > 0) {
-      toggleIcon = fg(t.direct, "●");
-    } else if (directCount > 0) {
-      toggleIcon = fg(t.needsAuth, "◐");
-    }
-
-    let toolInfo = "";
-    if (totalCount > 0) {
-      toolInfo = `${directCount}/${totalCount}`;
-      if (directCount > 0) {
-        const tokens = server.tools.filter((t) => t.isDirect).reduce((s, t) => s + t.estimatedTokens, 0);
-        toolInfo += `  ~${tokens.toLocaleString()}`;
-      }
-      toolInfo = fg(t.description, toolInfo);
-    }
-
-    return `${prefix} ${toggleIcon} ${nameStr}${importLabel}  ${toolInfo}${statusLabel}`;
+  private itemLabel(item: Item) {
+    if (item.type === "add") return color("32", "+") + " Add MCP server";
+    const s = item.type === "server" ? this.servers[item.s]! : this.servers[item.s]!;
+    if (item.type === "server") return `${s.expanded ? "▾" : "▸"} ${s.status === "connected" ? color("32", "●") : s.status === "needs-auth" ? color("33", "●") : "○"} ${s.name} ${color("2", `(${s.source}${s.importKind ? ":" + s.importKind : ""}, ${s.tools.length} tools)`)}`;
+    if (item.type === "tool") { const t = s.tools[item.t]!; return `    ${t.direct ? color("32", "✓") : color("2", "○")} ${t.name}${t.description ? color("2", " — " + t.description) : ""}`; }
+    const labels: Record<Action, string> = { status: `Connection status: ${this.statusText(s)}`, authenticate: "Authenticate", reauthenticate: "Re-authenticate", refresh: "Reconnect / refresh tools", "clear-cache": "Clear cached tools", tools: `${s.toolsOpen ? "Hide" : "Show"} tools` };
+    const disabled = (item.action === "authenticate" || item.action === "reauthenticate") && !this.callbacks.canAuthenticate(s.name);
+    return "  • " + (disabled ? color("2", labels[item.action]) : labels[item.action]);
   }
-
-  private renderConnectionStatus(server: ServerState): string {
-    const t = this.t;
-    if (this.authInFlight === server.name) return `  ${fg(t.needsAuth, "authenticating")}`;
-    if (server.connectionStatus === "needs-auth") return `  ${fg(t.needsAuth, "needs auth")}`;
-    if (server.connectionStatus === "connecting") return `  ${fg(t.needsAuth, "connecting")}`;
-    if (server.connectionStatus === "failed") return `  ${fg(t.cancel, "failed")}`;
-    if (this.authOnly && server.connectionStatus === "connected") return `  ${fg(t.direct, "connected")}`;
-    if (this.authOnly) return `  ${fg(t.description, "idle")}`;
-    return "";
-  }
-
-  private renderToolRow(tool: ToolState, isCursor: boolean, innerW: number): string {
-    const t = this.t;
-    const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
-
-    const toggleIcon = tool.isDirect ? fg(t.direct, "●") : fg(t.description, "○");
-    const cursor = isCursor ? fg(t.selected, "▸") : " ";
-    const nameStr = isCursor ? bold(fg(t.selected, tool.name)) : tool.name;
-
-    const prefixLen = 7 + visibleWidth(tool.name);
-    const maxDescLen = Math.max(0, innerW - prefixLen - 8);
-    const descStr =
-      maxDescLen > 5 && tool.description
-        ? fg(t.description, "— " + truncateToWidth(tool.description, maxDescLen, "…"))
-        : "";
-
-    return `  ${cursor} ${toggleIcon} ${nameStr} ${descStr}`;
-  }
-
-  invalidate(): void {}
-
-  dispose(): void {
-    this.cleanup();
+  private renderAdd(out: string[], row: (s?: string) => string, w: number) {
+    const values: Record<Field, string> = { name: this.draft.name || color("2;3", "my-server"), transport: this.draft.transport, target: this.draft.target || color("2;3", this.draft.transport === "http" ? "https://example.com/mcp" : "npx -y package"), auth: this.draft.auth, env: this.draft.env || color("2;3", "TOKEN_ENV for bearer-env"), scope: this.draft.scope, lifecycle: this.draft.lifecycle };
+    out.push(row(color("2", "Enter text; left/right cycles options; Esc cancels")));
+    for (let i = 0; i < FIELDS.length; i++) out.push(row(`${i === this.field ? color("36", "›") : " "} ${FIELDS[i]!.padEnd(10)} ${values[FIELDS[i]!]}`));
+    out.push(row(color("2", "Enter on lifecycle adds server. User scope writes private Pi config.")));
+    out.push(color("2", "╰" + "─".repeat(w) + "╯"));
+    return out;
   }
 }
 
-export function createMcpPanel(
-  config: McpConfig,
-  cache: MetadataCache | null,
-  provenance: Map<string, ServerProvenance>,
-  callbacks: McpPanelCallbacks,
-  tui: { requestRender(): void },
-  done: (result: McpPanelResult) => void,
-  options?: { noticeLines?: string[]; authOnly?: boolean },
-): McpPanel & { dispose(): void } {
-  return new McpPanel(config, cache, provenance, callbacks, tui, done, options ?? {});
+class SafePanel {
+  private error = "";
+  constructor(private inner: Panel, private tui: { requestRender(): void }, private done: (result: McpPanelResult) => void) {}
+  handleInput(data: string) { if (this.error && (matchesKey(data, "escape") || matchesKey(data, "ctrl+c"))) return this.done({ cancelled: true, changes: new Map() }); try { this.inner.handleInput(data); } catch (e) { this.error = msg(e); this.tui.requestRender(); } }
+  render(width: number) { if (this.error) return [`MCP panel error: ${this.error}`, "Press Esc to close."]; try { return this.inner.render(width); } catch (e) { this.error = msg(e); return this.render(width); } }
+  invalidate() { this.inner.invalidate(); }
+  dispose() { this.inner.dispose(); }
+}
+
+export function createMcpPanel(config: McpConfig, cache: MetadataCache | null, provenance: Map<string, ServerProvenance>, callbacks: McpPanelCallbacks, tui: { requestRender(): void }, done: (result: McpPanelResult) => void, options?: { noticeLines?: string[]; authOnly?: boolean }): { render(width: number): string[]; handleInput(data: string): void; invalidate(): void; dispose(): void } {
+  const panel = new Panel(config, cache, provenance, callbacks, tui, done, options);
+  return new SafePanel(panel, tui, done);
 }

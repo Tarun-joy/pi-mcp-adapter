@@ -374,6 +374,9 @@ export interface McpPanelCallbacks {
   reconnect: (serverName: string) => Promise<boolean>;
   canAuthenticate: (serverName: string) => boolean;
   authenticate: (serverName: string) => Promise<McpAuthResult>;
+  reauthenticate?: (serverName: string) => Promise<McpAuthResult>;
+  clearServerCache?: (serverName: string) => Promise<boolean>;
+  addServer?: (serverName: string, entry: ServerEntry, scope: "user" | "project") => Promise<void>;
   getConnectionStatus: (serverName: string) => "connected" | "idle" | "failed" | "needs-auth";
   refreshCacheAfterReconnect: (serverName: string) => import("./metadata-cache.ts").ServerCacheEntry | null;
 }
@@ -381,6 +384,7 @@ export interface McpPanelCallbacks {
 export interface McpPanelResult {
   changes: Map<string, true | string[] | false>;
   cancelled: boolean;
+  addedServer?: string;
 }
 
 /**

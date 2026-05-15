@@ -56,10 +56,17 @@ export function loadMetadataCache(): MetadataCache | null {
   }
 }
 
-export function saveMetadataCache(cache: MetadataCache): void {
+function writeMetadataCache(cache: MetadataCache): void {
   const cachePath = getMetadataCachePath();
   const dir = dirname(cachePath);
   mkdirSync(dir, { recursive: true });
+  const tmpPath = `${cachePath}.${process.pid}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(cache, null, 2), "utf-8");
+  renameSync(tmpPath, cachePath);
+}
+
+export function saveMetadataCache(cache: MetadataCache): void {
+  const cachePath = getMetadataCachePath();
 
   let merged: MetadataCache = { version: CACHE_VERSION, servers: {} };
   try {
@@ -75,10 +82,15 @@ export function saveMetadataCache(cache: MetadataCache): void {
 
   merged.version = CACHE_VERSION;
   merged.servers = { ...merged.servers, ...cache.servers };
+  writeMetadataCache(merged);
+}
 
-  const tmpPath = `${cachePath}.${process.pid}.tmp`;
-  writeFileSync(tmpPath, JSON.stringify(merged, null, 2), "utf-8");
-  renameSync(tmpPath, cachePath);
+export function clearServerMetadataCache(serverName: string): boolean {
+  const cache = loadMetadataCache();
+  if (!cache?.servers?.[serverName]) return false;
+  delete cache.servers[serverName];
+  writeMetadataCache(cache);
+  return true;
 }
 
 export function computeServerHash(definition: ServerEntry): string {

@@ -4,6 +4,8 @@ import type { McpAuthResult, McpConfig, ServerEntry, McpPanelCallbacks, McpPanel
 import {
   ensureCompatibilityImports,
   getMcpDiscoverySummary,
+  getPiGlobalConfigPath,
+  getProjectConfigPath,
   getServerProvenance,
   previewCompatibilityImports,
   previewSharedServerEntry,
@@ -13,7 +15,7 @@ import {
   writeStarterProjectConfig,
 } from "./config.ts";
 import { lazyConnect, updateMetadataCache, updateStatusBar, getFailureAgeSeconds } from "./init.ts";
-import { loadMetadataCache } from "./metadata-cache.ts";
+import { clearServerMetadataCache, loadMetadataCache } from "./metadata-cache.ts";
 import { buildToolMetadata } from "./tool-metadata.ts";
 import { supportsOAuth, authenticate, removeAuth } from "./mcp-auth-flow.ts";
 import { getAuthForUrl } from "./mcp-auth.ts";
@@ -213,6 +215,49 @@ export async function logoutServer(
   return { ok: true, message };
 }
 
+export async function reauthenticateServer(
+  serverName: string,
+  state: McpExtensionState,
+  ctx: ExtensionContext,
+): Promise<McpAuthResult> {
+  const cleared = await logoutServer(serverName, state, ctx);
+  if (!cleared.ok) return { ok: false, message: cleared.message };
+  return authenticateServer(serverName, state.config, ctx);
+}
+
+export async function clearServerCache(
+  serverName: string,
+  state: McpExtensionState,
+  ctx: ExtensionContext,
+): Promise<boolean> {
+  const removed = clearServerMetadataCache(serverName);
+  state.toolMetadata.delete(serverName);
+  await state.manager.close(serverName);
+  updateStatusBar(state);
+  if (ctx.hasUI) {
+    ctx.ui.notify(
+      removed
+        ? `MCP cache cleared for "${serverName}". Reconnect to repopulate tools.`
+        : `No MCP cache entry found for "${serverName}".`,
+      removed ? "info" : "warning",
+    );
+  }
+  return removed;
+}
+
+export async function addServerToConfig(
+  serverName: string,
+  entry: ServerEntry,
+  scope: "user" | "project",
+  ctx: ExtensionContext,
+  configOverridePath?: string,
+): Promise<string> {
+  const targetPath = scope === "project"
+    ? getProjectConfigPath(ctx.cwd)
+    : getPiGlobalConfigPath(configOverridePath);
+  return writeSharedServerEntry(targetPath, serverName, entry);
+}
+
 export interface PanelFlowResult {
   configChanged: boolean;
 }
@@ -301,6 +346,7 @@ function buildMcpPanelCallbacks(
   state: McpExtensionState,
   config: McpConfig,
   ctx: ExtensionContext,
+  configOverridePath?: string,
 ): McpPanelCallbacks {
   return {
     reconnect: (serverName: string) => lazyConnect(state, serverName),
@@ -309,6 +355,11 @@ function buildMcpPanelCallbacks(
       return definition ? supportsOAuth(definition) : false;
     },
     authenticate: (serverName: string) => authenticateServer(serverName, config, ctx),
+    reauthenticate: (serverName: string) => reauthenticateServer(serverName, state, ctx),
+    clearServerCache: (serverName: string) => clearServerCache(serverName, state, ctx),
+    addServer: async (serverName: string, entry: ServerEntry, scope: "user" | "project") => {
+      await addServerToConfig(serverName, entry, scope, ctx, configOverridePath);
+    },
     getConnectionStatus: (serverName: string) => {
       const definition = config.mcpServers[serverName];
       const connection = state.manager.getConnection(serverName);
@@ -351,7 +402,7 @@ export async function openMcpPanel(
   const provenanceMap = getServerProvenance(configPath, ctx.cwd);
   const { lines: noticeLines, fingerprint } = buildSharedConfigNoticeLines(configPath, ctx.cwd);
 
-  const callbacks = buildMcpPanelCallbacks(state, config, ctx);
+  const callbacks = buildMcpPanelCallbacks(state, config, ctx, configPath);
 
   const { createMcpPanel } = await import("./mcp-panel.ts");
   let configChanged = false;
@@ -365,11 +416,15 @@ export async function openMcpPanel(
             configChanged = true;
             ctx.ui.notify("Direct tools updated. Pi will reload after this panel closes.", "info");
           }
+          if (!result.cancelled && result.addedServer) {
+            configChanged = true;
+            ctx.ui.notify(`MCP server "${result.addedServer}" added. Pi will reload after this panel closes.`, "info");
+          }
           done(undefined);
           resolve();
         }, { noticeLines });
       },
-      { overlay: true, overlayOptions: { anchor: "center", width: 82 } },
+      { overlay: true, overlayOptions: { anchor: "center", width: 82 }, onHandle: (handle) => handle.focus() },
     );
   });
 
@@ -398,7 +453,7 @@ export async function openMcpAuthPanel(
   const cache = loadMetadataCache();
   const configPath = pi.getFlag("mcp-config") as string | undefined ?? configOverridePath;
   const provenanceMap = getServerProvenance(configPath, ctx.cwd);
-  const callbacks = buildMcpPanelCallbacks(state, config, ctx);
+  const callbacks = buildMcpPanelCallbacks(state, config, ctx, configPath);
   const { createMcpPanel } = await import("./mcp-panel.ts");
 
   await new Promise<void>((resolve) => {
@@ -412,7 +467,7 @@ export async function openMcpAuthPanel(
           noticeLines: ["Select an OAuth MCP server and press Enter or ctrl+a to authenticate."],
         });
       },
-      { overlay: true, overlayOptions: { anchor: "center", width: 82 } },
+      { overlay: true, overlayOptions: { anchor: "center", width: 82 }, onHandle: (handle) => handle.focus() },
     );
   });
 
