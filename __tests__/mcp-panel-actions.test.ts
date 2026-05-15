@@ -109,7 +109,7 @@ describe("mcp-panel server actions", () => {
     for (const ch of "demo") panel.handleInput(ch);
     panel.handleInput("\r"); // transport
     panel.handleInput("\r"); // target
-    for (const ch of "https://demo.example/mcp") panel.handleInput(ch);
+    panel.handleInput("\x1b[200~https://demo.example/mcp\x1b[201~");
     panel.handleInput("\r"); // auth
     panel.handleInput("\r"); // env
     panel.handleInput("\r"); // scope
@@ -123,6 +123,23 @@ describe("mcp-panel server actions", () => {
       "user",
     );
     expect(done).toHaveBeenCalledWith(expect.objectContaining({ cancelled: false, addedServer: "demo" }));
+    panel.dispose();
+  });
+
+  it("keeps the overlay usable when connect/refresh fails", async () => {
+    const cfg = config();
+    const cbs = callbacks();
+    cbs.reconnect = vi.fn(() => { throw new Error("connect failed"); });
+    const panel = createMcpPanel(cfg, cache(cfg), new Map(), cbs, { requestRender: () => {} }, () => {});
+
+    panel.handleInput("\r");
+    down(panel, 4);
+    panel.handleInput("\r");
+    await Promise.resolve();
+
+    const output = stripAnsi(panel.render(100).join("\n"));
+    expect(output).toContain("github: connect failed");
+    expect(output).not.toContain("MCP panel error");
     panel.dispose();
   });
 

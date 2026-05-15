@@ -20,9 +20,14 @@ const score = (q: string, s: string) => !q || s.toLowerCase().includes(q.toLower
 const envKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function textInput(data: string): string {
+  if (data === "\r" || data === "\n" || data === "\t") return "";
   const text = data.replace(/\x1b\[200~/g, "").replace(/\x1b\[201~/g, "");
   if (text.includes("\x1b")) return "";
   return Array.from(text.replace(/[\r\n\t]+/g, " ")).filter(ch => ch.charCodeAt(0) >= 32 && ch.charCodeAt(0) !== 127).join("");
+}
+
+function isPastedText(data: string, input: string): boolean {
+  return input.length > 0 && (data.length > 1 || data.includes("\x1b[200~") || data.includes("\x1b[201~"));
 }
 
 function parseEnvInput(input: string): Record<string, string> | undefined {
@@ -152,6 +157,11 @@ class Panel {
     return { cancelled: false, changes };
   }
   private updateDirty() { this.dirty = this.servers.some(s => s.tools.some(t => t.direct !== t.wasDirect)); }
+  private safeStatus(server: ServerState) {
+    try { return this.callbacks.getConnectionStatus(server.name); }
+    catch (e) { this.notice = `${server.name}: ${msg(e)}`; return "failed" as Status; }
+  }
+  private requestRender() { try { this.tui.requestRender(); } catch {} }
 
   handleInput(data: string) {
     this.armTimer();
@@ -172,8 +182,9 @@ class Panel {
     if (matchesKey(data, "ctrl+a")) return this.authFor(this.items[this.cursor], false);
     if (matchesKey(data, "ctrl+r")) return this.refreshFor(this.items[this.cursor]);
     if (data === "?" && this.opts.authOnly) return;
-    if (matchesKey(data, "backspace")) { this.query = this.query.slice(0, -1); this.rebuild(); return; }
     const input = textInput(data);
+    if (isPastedText(data, input)) { this.query += input; this.rebuild(); return; }
+    if (matchesKey(data, "backspace")) { this.query = this.query.slice(0, -1); this.rebuild(); return; }
     if (input) { this.query += input; this.rebuild(); }
   }
 
@@ -187,7 +198,7 @@ class Panel {
       server.expanded = !server.expanded; server.toolsOpen = true; this.rebuild(); return;
     }
     if (item.type === "tool") { const tool = server.tools[item.t]; if (tool) this.notice = `${server.name}/${tool.name}: Space toggles direct, ctrl+s saves.`; return; }
-    if (item.action === "status") { server.status = this.callbacks.getConnectionStatus(server.name); this.notice = `${server.name}: ${this.statusText(server)}`; return; }
+    if (item.action === "status") { server.status = this.safeStatus(server); this.notice = `${server.name}: ${this.statusText(server)}`; return; }
     if (item.action === "authenticate") return this.authenticate(server, false);
     if (item.action === "reauthenticate") return this.authenticate(server, true);
     if (item.action === "refresh") return this.refresh(server);
@@ -212,37 +223,56 @@ class Panel {
   private refreshFor(item?: Item) { if (item && item.type !== "add") this.refresh(this.servers[item.s]!); }
   private authenticate(server: ServerState, reauth: boolean) {
     if (this.authInFlight.has(server.name)) return;
-    if (!this.callbacks.canAuthenticate(server.name)) { this.notice = `${server.name} is not OAuth-capable.`; return; }
+    let canAuth = false;
+    try { canAuth = this.callbacks.canAuthenticate(server.name); } catch (e) { this.notice = `${server.name}: ${msg(e)}`; return; }
+    if (!canAuth) { this.notice = `${server.name} is not OAuth-capable.`; return; }
     this.authInFlight.add(server.name);
-    server.status = "connecting"; this.notice = `${reauth ? "Re-authenticating" : "Authenticating"} ${server.name}...`; this.tui.requestRender();
-    const p = reauth
-      ? (this.callbacks.reauthenticate?.(server.name) ?? this.callbacks.authenticate(server.name))
-      : this.callbacks.authenticate(server.name);
-    p.then(r => {
-      server.status = this.callbacks.getConnectionStatus(server.name);
-      this.notice = r.ok ? `OAuth finished for ${server.name}` : `OAuth failed for ${server.name}: ${r.message ?? "unknown error"}`;
-      this.authInFlight.delete(server.name);
-      this.tui.requestRender();
-    }).catch(e => {
-      server.status = this.callbacks.getConnectionStatus(server.name);
+    server.status = "connecting"; this.notice = `${reauth ? "Re-authenticating" : "Authenticating"} ${server.name}...`; this.requestRender();
+    let p: PromiseLike<{ ok: boolean; message?: string }>;
+    try {
+      p = reauth
+        ? (this.callbacks.reauthenticate?.(server.name) ?? this.callbacks.authenticate(server.name))
+        : this.callbacks.authenticate(server.name);
+    } catch (e) {
+      server.status = this.safeStatus(server);
       this.notice = `OAuth failed for ${server.name}: ${msg(e)}`;
       this.authInFlight.delete(server.name);
-      this.tui.requestRender();
+      this.requestRender();
+      return;
+    }
+    Promise.resolve(p).then(r => {
+      server.status = this.safeStatus(server);
+      this.notice = r.ok ? `OAuth finished for ${server.name}` : `OAuth failed for ${server.name}: ${r.message ?? "unknown error"}`;
+      this.authInFlight.delete(server.name);
+      this.requestRender();
+    }).catch(e => {
+      server.status = this.safeStatus(server);
+      this.notice = `OAuth failed for ${server.name}: ${msg(e)}`;
+      this.authInFlight.delete(server.name);
+      this.requestRender();
     });
   }
   private refresh(server: ServerState) {
-    server.status = "connecting"; this.notice = `Refreshing ${server.name}...`; this.tui.requestRender();
-    this.callbacks.reconnect(server.name).then(() => {
-      server.status = this.callbacks.getConnectionStatus(server.name);
-      const entry = this.callbacks.refreshCacheAfterReconnect(server.name);
+    server.status = "connecting"; this.notice = `Refreshing ${server.name}...`; this.requestRender();
+    let p: PromiseLike<unknown>;
+    try { p = this.callbacks.reconnect(server.name); }
+    catch (e) { server.status = "failed"; this.notice = `${server.name}: ${msg(e)}`; this.requestRender(); return; }
+    Promise.resolve(p).then(() => {
+      server.status = this.safeStatus(server);
+      let entry: ServerCacheEntry | null = null;
+      try { entry = this.callbacks.refreshCacheAfterReconnect(server.name); }
+      catch (e) { this.notice = `${server.name}: ${msg(e)}`; server.status = "failed"; this.requestRender(); return; }
       if (entry) this.rebuildTools(server, entry);
-      server.cached = !!entry; this.notice = `${server.name}: ${this.statusText(server)}`; this.tui.requestRender();
-    }).catch(e => { server.status = "failed"; this.notice = `${server.name}: ${msg(e)}`; this.tui.requestRender(); });
+      server.cached = !!entry; this.notice = `${server.name}: ${this.statusText(server)}`; this.requestRender();
+    }).catch(e => { server.status = "failed"; this.notice = `${server.name}: ${msg(e)}`; this.requestRender(); });
   }
   private clear(server: ServerState) {
     if (!this.callbacks.clearServerCache) { this.notice = "Clear cache is unavailable."; return; }
-    this.callbacks.clearServerCache(server.name).then(removed => { server.tools = []; server.cached = false; this.updateDirty(); this.rebuild(); this.notice = removed ? `${server.name}: cache cleared.` : `${server.name}: no cache entry.`; this.tui.requestRender(); })
-      .catch(e => { this.notice = `${server.name}: ${msg(e)}`; this.tui.requestRender(); });
+    let p: PromiseLike<boolean>;
+    try { p = this.callbacks.clearServerCache(server.name); }
+    catch (e) { this.notice = `${server.name}: ${msg(e)}`; this.requestRender(); return; }
+    Promise.resolve(p).then(removed => { server.tools = []; server.cached = false; this.updateDirty(); this.rebuild(); this.notice = removed ? `${server.name}: cache cleared.` : `${server.name}: no cache entry.`; this.requestRender(); })
+      .catch(e => { this.notice = `${server.name}: ${msg(e)}`; this.requestRender(); });
   }
   private rebuildTools(server: ServerState, entry: ServerCacheEntry) {
     server.tools = [];
@@ -257,6 +287,8 @@ class Panel {
   private handleDiscard(data: string) { if (matchesKey(data, "return") || data === "y" || data === "Y") this.close(true); else if (matchesKey(data, "escape") || data === "n" || data === "N") this.confirmDiscard = false; }
   private handleAdd(data: string) {
     const field = FIELDS[this.field]!;
+    const input = textInput(data);
+    if (isPastedText(data, input)) return this.appendField(field, input);
     if (matchesKey(data, "ctrl+c")) return this.close(true);
     if (matchesKey(data, "escape")) { this.addMode = false; this.notice = ""; return; }
     if (matchesKey(data, "up")) { this.field = Math.max(0, this.field - 1); return; }
@@ -264,8 +296,12 @@ class Panel {
     if (matchesKey(data, "left") || matchesKey(data, "right")) { this.cycleField(field, matchesKey(data, "right") ? 1 : -1); return; }
     if (matchesKey(data, "backspace")) { if (field === "name") this.draft.name = this.draft.name.slice(0, -1); if (field === "target") this.draft.target = this.draft.target.slice(0, -1); if (field === "env") this.draft.env = this.draft.env.slice(0, -1); return; }
     if (matchesKey(data, "return")) { if (this.field < FIELDS.length - 1) { this.field++; return; } return this.submitAdd(); }
-    const input = textInput(data);
-    if (input) { if (field === "name") this.draft.name += input; if (field === "target") this.draft.target += input; if (field === "env") this.draft.env += input; }
+    if (input) this.appendField(field, input);
+  }
+  private appendField(field: Field, input: string) {
+    if (field === "name") this.draft.name += input;
+    if (field === "target") this.draft.target += input;
+    if (field === "env") this.draft.env += input;
   }
   private cycleField(field: Field, d: number) {
     if (field === "transport") this.draft.transport = cycle(["http", "stdio"], this.draft.transport, d);
@@ -282,7 +318,10 @@ class Panel {
     try { entry = entryFromDraft(this.draft); }
     catch (e) { this.notice = msg(e); return; }
     if (this.draft.transport === "stdio" && !entry.command) { this.notice = "Command is required."; return; }
-    this.callbacks.addServer(name, entry, this.draft.scope).then(() => this.close(false, name)).catch(e => { this.notice = msg(e); this.tui.requestRender(); });
+    let p: PromiseLike<void>;
+    try { p = this.callbacks.addServer(name, entry, this.draft.scope); }
+    catch (e) { this.notice = msg(e); this.requestRender(); return; }
+    Promise.resolve(p).then(() => this.close(false, name)).catch(e => { this.notice = msg(e); this.requestRender(); });
   }
 
   private statusText(server: ServerState) { return server.status === "connected" ? `connected (${server.tools.length} tools)` : server.status === "needs-auth" ? "needs auth" : server.status; }
