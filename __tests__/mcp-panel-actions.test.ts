@@ -140,7 +140,7 @@ describe("mcp-panel server actions", () => {
     for (const ch of "npx -y @notionhq/notion-mcp-server") panel.handleInput(ch);
     panel.handleInput("\r"); // auth
     panel.handleInput("\r"); // env
-    for (const ch of "NOTION_TOKEN=ntn_test_token") panel.handleInput(ch);
+    panel.handleInput("\x1b[200~NOTION_TOKEN=ntn_test_token\x1b[201~");
     panel.handleInput("\r"); // scope
     panel.handleInput("\r"); // lifecycle
     panel.handleInput("\r"); // submit

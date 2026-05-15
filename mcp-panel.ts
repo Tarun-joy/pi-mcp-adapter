@@ -19,6 +19,12 @@ const msg = (e: unknown) => e instanceof Error ? e.message : String(e);
 const score = (q: string, s: string) => !q || s.toLowerCase().includes(q.toLowerCase());
 const envKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+function textInput(data: string): string {
+  const text = data.replace(/\x1b\[200~/g, "").replace(/\x1b\[201~/g, "");
+  if (text.includes("\x1b")) return "";
+  return Array.from(text.replace(/[\r\n\t]+/g, " ")).filter(ch => ch.charCodeAt(0) >= 32 && ch.charCodeAt(0) !== 127).join("");
+}
+
 function parseEnvInput(input: string): Record<string, string> | undefined {
   const text = input.trim();
   if (!text) return undefined;
@@ -167,7 +173,8 @@ class Panel {
     if (matchesKey(data, "ctrl+r")) return this.refreshFor(this.items[this.cursor]);
     if (data === "?" && this.opts.authOnly) return;
     if (matchesKey(data, "backspace")) { this.query = this.query.slice(0, -1); this.rebuild(); return; }
-    if (data.length === 1 && data.charCodeAt(0) >= 32) { this.query += data; this.rebuild(); }
+    const input = textInput(data);
+    if (input) { this.query += input; this.rebuild(); }
   }
 
   private activate(item?: Item) {
@@ -257,7 +264,8 @@ class Panel {
     if (matchesKey(data, "left") || matchesKey(data, "right")) { this.cycleField(field, matchesKey(data, "right") ? 1 : -1); return; }
     if (matchesKey(data, "backspace")) { if (field === "name") this.draft.name = this.draft.name.slice(0, -1); if (field === "target") this.draft.target = this.draft.target.slice(0, -1); if (field === "env") this.draft.env = this.draft.env.slice(0, -1); return; }
     if (matchesKey(data, "return")) { if (this.field < FIELDS.length - 1) { this.field++; return; } return this.submitAdd(); }
-    if (data.length === 1 && data.charCodeAt(0) >= 32) { if (field === "name") this.draft.name += data; if (field === "target") this.draft.target += data; if (field === "env") this.draft.env += data; }
+    const input = textInput(data);
+    if (input) { if (field === "name") this.draft.name += input; if (field === "target") this.draft.target += input; if (field === "env") this.draft.env += input; }
   }
   private cycleField(field: Field, d: number) {
     if (field === "transport") this.draft.transport = cycle(["http", "stdio"], this.draft.transport, d);
