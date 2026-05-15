@@ -8,11 +8,13 @@ type Status = "connected" | "idle" | "failed" | "needs-auth" | "connecting";
 type Item = { type: "add" } | { type: "server"; s: number } | { type: "action"; s: number; action: Action } | { type: "tool"; s: number; t: number };
 type Action = "status" | "authenticate" | "reauthenticate" | "refresh" | "clear-cache" | "tools";
 type Field = "name" | "transport" | "target" | "auth" | "scope" | "lifecycle" | "env";
+type PanelOptions = { noticeLines?: string[]; authOnly?: boolean; selectedText?: (text: string) => string };
 
 const ACTIONS: Action[] = ["status", "authenticate", "reauthenticate", "refresh", "clear-cache", "tools"];
 const FIELDS: Field[] = ["name", "transport", "target", "auth", "env", "scope", "lifecycle"];
 const CSI = "\x1b[";
 const color = (c: string, s: string) => `${CSI}${c}m${s}${CSI}0m`;
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 const msg = (e: unknown) => e instanceof Error ? e.message : String(e);
 const score = (q: string, s: string) => !q || s.toLowerCase().includes(q.toLowerCase());
 const tokens = (tool: CachedTool) => Math.ceil((tool.name.length + (tool.description?.length ?? 0) + JSON.stringify(tool.inputSchema ?? {}).length) / 4) + 10;
@@ -59,7 +61,7 @@ class Panel {
     private callbacks: McpPanelCallbacks,
     private tui: { requestRender(): void },
     private done: (result: McpPanelResult) => void,
-    private opts: { noticeLines?: string[]; authOnly?: boolean } = {},
+    private opts: PanelOptions = {},
   ) {
     this.prefix = config.settings?.toolPrefix ?? "server";
     for (const [name, def] of Object.entries(config.mcpServers)) {
@@ -264,7 +266,10 @@ class Panel {
     out.push(row(this.query ? `Search: ${this.query}` : color("2;3", "Type to search · a add server · Enter expand/action · Space toggle direct")));
     const start = Math.max(0, Math.min(this.cursor - 6, this.items.length - 12));
     const end = Math.min(this.items.length, start + 12);
-    for (let i = start; i < end; i++) out.push(row((i === this.cursor ? color("7", this.itemLabel(this.items[i]!)) : this.itemLabel(this.items[i]!))));
+    for (let i = start; i < end; i++) {
+      const label = this.itemLabel(this.items[i]!);
+      out.push(row(i === this.cursor ? this.selectedLabel(label) : label));
+    }
     const direct = this.servers.reduce((n, s) => n + s.tools.filter(t => t.direct).length, 0);
     const toks = this.servers.reduce((n, s) => n + s.tools.filter(t => t.direct).reduce((a, t) => a + t.tokens, 0), 0);
     out.push(row(`Direct: ${direct} tools · ~${toks} tokens${this.dirty ? color("33", " · unsaved") : ""}`));
@@ -272,6 +277,14 @@ class Panel {
     out.push(color("2", "╰" + "─".repeat(w) + "╯"));
     return out;
   }
+  private selected(text: string) {
+    return this.opts.selectedText?.(text) ?? color("36", text);
+  }
+
+  private selectedLabel(label: string) {
+    return this.selected(`› ${stripAnsi(label)}`);
+  }
+
   private itemLabel(item: Item) {
     if (item.type === "add") return color("32", "+") + " Add MCP server";
     const s = item.type === "server" ? this.servers[item.s]! : this.servers[item.s]!;
@@ -284,7 +297,7 @@ class Panel {
   private renderAdd(out: string[], row: (s?: string) => string, w: number) {
     const values: Record<Field, string> = { name: this.draft.name || color("2;3", "my-server"), transport: this.draft.transport, target: this.draft.target || color("2;3", this.draft.transport === "http" ? "https://example.com/mcp" : "npx -y package"), auth: this.draft.auth, env: this.draft.env || color("2;3", "TOKEN_ENV for bearer-env"), scope: this.draft.scope, lifecycle: this.draft.lifecycle };
     out.push(row(color("2", "Enter text; left/right cycles options; Esc cancels")));
-    for (let i = 0; i < FIELDS.length; i++) out.push(row(`${i === this.field ? color("36", "›") : " "} ${FIELDS[i]!.padEnd(10)} ${values[FIELDS[i]!]}`));
+    for (let i = 0; i < FIELDS.length; i++) out.push(row(`${i === this.field ? this.selected("›") : " "} ${FIELDS[i]!.padEnd(10)} ${values[FIELDS[i]!]}`));
     out.push(row(color("2", "Enter on lifecycle adds server. User scope writes private Pi config.")));
     out.push(color("2", "╰" + "─".repeat(w) + "╯"));
     return out;
@@ -300,7 +313,7 @@ class SafePanel {
   dispose() { this.inner.dispose(); }
 }
 
-export function createMcpPanel(config: McpConfig, cache: MetadataCache | null, provenance: Map<string, ServerProvenance>, callbacks: McpPanelCallbacks, tui: { requestRender(): void }, done: (result: McpPanelResult) => void, options?: { noticeLines?: string[]; authOnly?: boolean }): { render(width: number): string[]; handleInput(data: string): void; invalidate(): void; dispose(): void } {
+export function createMcpPanel(config: McpConfig, cache: MetadataCache | null, provenance: Map<string, ServerProvenance>, callbacks: McpPanelCallbacks, tui: { requestRender(): void }, done: (result: McpPanelResult) => void, options?: PanelOptions): { render(width: number): string[]; handleInput(data: string): void; invalidate(): void; dispose(): void } {
   const panel = new Panel(config, cache, provenance, callbacks, tui, done, options);
   return new SafePanel(panel, tui, done);
 }

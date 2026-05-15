@@ -409,7 +409,8 @@ export async function openMcpPanel(
 
   await new Promise<void>((resolve) => {
     ctx.ui.custom(
-      (tui, _theme, _keybindings, done) => {
+      (tui, theme, _keybindings, done) => {
+        const selectedText = theme.getThinkingBorderColor?.(pi.getThinkingLevel?.() ?? "off");
         return createMcpPanel(config, cache, provenanceMap, callbacks, tui, (result: McpPanelResult) => {
           if (!result.cancelled && result.changes.size > 0) {
             writeDirectToolsConfig(result.changes, provenanceMap, config);
@@ -422,7 +423,7 @@ export async function openMcpPanel(
           }
           done(undefined);
           resolve();
-        }, { noticeLines });
+        }, { noticeLines, selectedText });
       },
       { overlay: true, overlayOptions: { anchor: "center", width: 82 }, onHandle: (handle) => handle.focus() },
     );
@@ -458,13 +459,15 @@ export async function openMcpAuthPanel(
 
   await new Promise<void>((resolve) => {
     ctx.ui.custom(
-      (tui, _theme, _keybindings, done) => {
+      (tui, theme, _keybindings, done) => {
+        const selectedText = theme.getThinkingBorderColor?.(pi.getThinkingLevel?.() ?? "off");
         return createMcpPanel(config, cache, provenanceMap, callbacks, tui, () => {
           done(undefined);
           resolve();
         }, {
           authOnly: true,
           noticeLines: ["Select an OAuth MCP server and press Enter or ctrl+a to authenticate."],
+          selectedText,
         });
       },
       { overlay: true, overlayOptions: { anchor: "center", width: 82 }, onHandle: (handle) => handle.focus() },
