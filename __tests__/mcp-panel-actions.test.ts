@@ -125,4 +125,37 @@ describe("mcp-panel server actions", () => {
     expect(done).toHaveBeenCalledWith(expect.objectContaining({ cancelled: false, addedServer: "demo" }));
     panel.dispose();
   });
+
+  it("stores env variables from the add form for stdio servers", async () => {
+    const cfg = config();
+    const cbs = callbacks();
+    cbs.addServer = vi.fn(async () => {});
+    const panel = createMcpPanel(cfg, cache(cfg), new Map(), cbs, { requestRender: () => {} }, () => {});
+
+    panel.handleInput("a");
+    for (const ch of "notionApiResearch") panel.handleInput(ch);
+    panel.handleInput("\r"); // transport
+    panel.handleInput("\x1b[C"); // stdio
+    panel.handleInput("\r"); // target
+    for (const ch of "npx -y @notionhq/notion-mcp-server") panel.handleInput(ch);
+    panel.handleInput("\r"); // auth
+    panel.handleInput("\r"); // env
+    for (const ch of "NOTION_TOKEN=ntn_test_token") panel.handleInput(ch);
+    panel.handleInput("\r"); // scope
+    panel.handleInput("\r"); // lifecycle
+    panel.handleInput("\r"); // submit
+    await Promise.resolve();
+
+    expect(cbs.addServer).toHaveBeenCalledWith(
+      "notionApiResearch",
+      expect.objectContaining({
+        command: "npx",
+        args: ["-y", "@notionhq/notion-mcp-server"],
+        env: { NOTION_TOKEN: "ntn_test_token" },
+        lifecycle: "lazy",
+      }),
+      "user",
+    );
+    panel.dispose();
+  });
 });

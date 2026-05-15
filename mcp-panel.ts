@@ -17,6 +17,24 @@ const color = (c: string, s: string) => `${CSI}${c}m${s}${CSI}0m`;
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 const msg = (e: unknown) => e instanceof Error ? e.message : String(e);
 const score = (q: string, s: string) => !q || s.toLowerCase().includes(q.toLowerCase());
+const envKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function parseEnvInput(input: string): Record<string, string> | undefined {
+  const text = input.trim();
+  if (!text) return undefined;
+  const entries: Record<string, string> = {};
+  for (const rawPair of text.split(/[;,]\s*|\s+(?=[A-Za-z_][A-Za-z0-9_]*=)/).filter(Boolean)) {
+    const idx = rawPair.indexOf("=");
+    if (idx <= 0) throw new Error("Env must use KEY=value pairs, separated by commas or spaces.");
+    const key = rawPair.slice(0, idx).trim();
+    let value = rawPair.slice(idx + 1).trim();
+    if (!envKey.test(key)) throw new Error(`Invalid env key: ${key}`);
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+    entries[key] = value;
+  }
+  return Object.keys(entries).length ? entries : undefined;
+}
+
 const tokens = (tool: CachedTool) => Math.ceil((tool.name.length + (tool.description?.length ?? 0) + JSON.stringify(tool.inputSchema ?? {}).length) / 4) + 10;
 const cycle = <T,>(xs: readonly T[], x: T, d: number) => xs[(Math.max(0, xs.indexOf(x)) + d + xs.length) % xs.length]!;
 
@@ -30,11 +48,16 @@ function entryFromDraft(d: Draft): ServerEntry {
   const entry: ServerEntry = d.transport === "http"
     ? { url: d.target.trim(), lifecycle: d.lifecycle }
     : { command: parts[0] ?? "", args: parts.slice(1), lifecycle: d.lifecycle };
+  const envText = d.env.trim();
+  const env = envText.includes("=") ? parseEnvInput(envText) : undefined;
+  if (envText && !env && d.auth !== "bearer-env") throw new Error("Env must use KEY=value pairs, separated by commas or spaces.");
+  if (env && d.auth !== "bearer-env") entry.env = env;
   if (d.auth === "oauth") entry.auth = "oauth";
   if (d.auth === "none") entry.auth = false;
   if (d.auth === "bearer-env") {
     entry.auth = "bearer";
-    entry.bearerTokenEnv = d.env || `${d.name.trim().toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MCP_TOKEN`;
+    if (env) entry.bearerToken = Object.values(env)[0] ?? "";
+    else entry.bearerTokenEnv = d.env || `${d.name.trim().toUpperCase().replace(/[^A-Z0-9]/g, "_")}_MCP_TOKEN`;
   }
   return entry;
 }
@@ -247,7 +270,9 @@ class Panel {
     if (!this.callbacks.addServer) { this.notice = "Add server is unavailable."; return; }
     if (!/^[A-Za-z0-9_.-]+$/.test(name)) { this.notice = "Invalid server name."; return; }
     if (!this.draft.target.trim()) { this.notice = "Target is required."; return; }
-    const entry = entryFromDraft(this.draft);
+    let entry: ServerEntry;
+    try { entry = entryFromDraft(this.draft); }
+    catch (e) { this.notice = msg(e); return; }
     if (this.draft.transport === "stdio" && !entry.command) { this.notice = "Command is required."; return; }
     this.callbacks.addServer(name, entry, this.draft.scope).then(() => this.close(false, name)).catch(e => { this.notice = msg(e); this.tui.requestRender(); });
   }
@@ -307,10 +332,10 @@ class Panel {
     return "  • " + (disabled ? color("2", labels[item.action]) : labels[item.action]);
   }
   private renderAdd(out: string[], row: (s?: string) => string, w: number) {
-    const values: Record<Field, string> = { name: this.draft.name || color("2;3", "my-server"), transport: this.draft.transport, target: this.draft.target || color("2;3", this.draft.transport === "http" ? "https://example.com/mcp" : "npx -y package"), auth: this.draft.auth, env: this.draft.env || color("2;3", "TOKEN_ENV for bearer-env"), scope: this.draft.scope, lifecycle: this.draft.lifecycle };
-    out.push(row(color("2", "Enter text; left/right cycles options; Esc cancels")));
+    const values: Record<Field, string> = { name: this.draft.name || color("2;3", "my-server"), transport: this.draft.transport, target: this.draft.target || color("2;3", this.draft.transport === "http" ? "https://example.com/mcp" : "npx -y package"), auth: this.draft.auth, env: this.draft.env || color("2;3", "KEY=value or TOKEN_ENV for bearer-env"), scope: this.draft.scope, lifecycle: this.draft.lifecycle };
+    out.push(row(color("2", "Enter text; left/right cycles options; env supports KEY=value pairs")));
     for (let i = 0; i < FIELDS.length; i++) out.push(row(`${i === this.field ? this.selected("›") : " "} ${FIELDS[i]!.padEnd(10)} ${values[FIELDS[i]!]}`));
-    out.push(row(color("2", "Enter on lifecycle adds server. User scope writes private Pi config.")));
+    out.push(row(color("2", "Enter on lifecycle adds server. User scope writes gitignored private Pi config.")));
     out.push(color("2", "╰" + "─".repeat(w) + "╯"));
     return out;
   }
