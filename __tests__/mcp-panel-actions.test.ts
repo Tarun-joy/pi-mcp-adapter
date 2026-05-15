@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createMcpPanel } from "../mcp-panel.ts";
 import { computeServerHash, type MetadataCache } from "../metadata-cache.ts";
-import type { McpConfig, McpPanelCallbacks } from "../types.ts";
+import type { McpConfig, McpPanelCallbacks, ServerProvenance } from "../types.ts";
 
 function stripAnsi(input: string): string {
   return input.replace(/\x1b\[[0-9;]*m/g, "");
@@ -53,6 +53,20 @@ describe("mcp-panel server actions", () => {
     expect(output).toContain("Re-authenticate");
     expect(output).toContain("Reconnect / refresh tools");
     expect(output).toContain("Clear cached tools");
+    panel.dispose();
+  });
+
+  it("shows configured scope and config path for each server", () => {
+    const cfg = config();
+    const provenance = new Map<string, ServerProvenance>([
+      ["github", { kind: "project", path: "/repo/.mcp.json" }],
+    ]);
+    const panel = createMcpPanel(cfg, cache(cfg), provenance, callbacks(), { requestRender: () => {} }, () => {});
+
+    expect(stripAnsi(panel.render(100).join("\n"))).toContain("github (project, 1 tools)");
+
+    panel.handleInput("\r");
+    expect(stripAnsi(panel.render(140).join("\n"))).toContain("github (project, 1 tools · /repo/.mcp.json)");
     panel.dispose();
   });
 
