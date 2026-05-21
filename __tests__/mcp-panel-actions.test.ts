@@ -56,6 +56,23 @@ describe("mcp-panel server actions", () => {
     panel.dispose();
   });
 
+  it("shows not-connected state as connectable instead of blocked auth rows", () => {
+    const cfg: McpConfig = { mcpServers: { context7: { command: "npx", args: ["-y", "@upstash/context7-mcp"] } } };
+    const cbs = callbacks();
+    cbs.canAuthenticate = () => false;
+    cbs.getConnectionStatus = () => "idle";
+    const panel = createMcpPanel(cfg, cache({ mcpServers: { github: cfg.mcpServers.context7 } }), new Map(), cbs, { requestRender: () => {} }, () => {});
+
+    panel.handleInput("\r");
+
+    const output = stripAnsi(panel.render(100).join("\n"));
+    expect(output).toContain("Connection status: not connected");
+    expect(output).toContain("Connect / refresh tools");
+    expect(output).not.toContain("Authenticate");
+    expect(output).not.toContain("Re-authenticate");
+    panel.dispose();
+  });
+
   it("shows configured scope and config path for each server", () => {
     const cfg = config();
     const provenance = new Map<string, ServerProvenance>([

@@ -11,6 +11,7 @@ type Field = "name" | "transport" | "target" | "auth" | "scope" | "lifecycle" | 
 type PanelOptions = { noticeLines?: string[]; authOnly?: boolean; selectedText?: (text: string) => string };
 
 const ACTIONS: Action[] = ["status", "authenticate", "reauthenticate", "refresh", "clear-cache", "tools"];
+const NON_AUTH_ACTIONS: Action[] = ["status", "refresh", "clear-cache", "tools"];
 const FIELDS: Field[] = ["name", "transport", "target", "auth", "env", "scope", "lifecycle"];
 const CSI = "\x1b[";
 const color = (c: string, s: string) => `${CSI}${c}m${s}${CSI}0m`;
@@ -139,7 +140,8 @@ class Panel {
       if (!this.query || score(this.query, server.name) || matchingTools.length > 0) this.items.push({ type: "server", s });
       if (this.query) for (const { t } of matchingTools) this.items.push({ type: "tool", s, t });
       else if (server.expanded && !this.opts.authOnly) {
-        for (const action of ACTIONS) this.items.push({ type: "action", s, action });
+        const actions = this.safeCanAuthenticate(server) ? ACTIONS : NON_AUTH_ACTIONS;
+        for (const action of actions) this.items.push({ type: "action", s, action });
         if (server.toolsOpen) for (let t = 0; t < server.tools.length; t++) this.items.push({ type: "tool", s, t });
       }
     }
@@ -160,6 +162,10 @@ class Panel {
   private safeStatus(server: ServerState) {
     try { return this.callbacks.getConnectionStatus(server.name); }
     catch (e) { this.notice = `${server.name}: ${msg(e)}`; return "failed" as Status; }
+  }
+  private safeCanAuthenticate(server: ServerState) {
+    try { return this.callbacks.canAuthenticate(server.name); }
+    catch (e) { this.notice = `${server.name}: ${msg(e)}`; return false; }
   }
   private requestRender() { try { this.tui.requestRender(); } catch {} }
 
@@ -324,7 +330,7 @@ class Panel {
     Promise.resolve(p).then(() => this.close(false, name)).catch(e => { this.notice = msg(e); this.requestRender(); });
   }
 
-  private statusText(server: ServerState) { return server.status === "connected" ? `connected (${server.tools.length} tools)` : server.status === "needs-auth" ? "needs auth" : server.status; }
+  private statusText(server: ServerState) { return server.status === "connected" ? `connected (${server.tools.length} tools)` : server.status === "needs-auth" ? "needs auth" : server.status === "idle" ? "not connected" : server.status; }
 
   render(width: number): string[] {
     const w = Math.max(30, width - 2);
@@ -374,8 +380,8 @@ class Panel {
     const s = item.type === "server" ? this.servers[item.s]! : this.servers[item.s]!;
     if (item.type === "server") return `${s.expanded ? "▾" : "▸"} ${s.status === "connected" ? color("32", "●") : s.status === "needs-auth" ? color("33", "●") : "○"} ${s.name} ${color("2", `(${this.scopeDetails(s)})`)}`;
     if (item.type === "tool") { const t = s.tools[item.t]!; return `    ${t.direct ? color("32", "✓") : color("2", "○")} ${t.name}${t.description ? color("2", " — " + t.description) : ""}`; }
-    const labels: Record<Action, string> = { status: `Connection status: ${this.statusText(s)}`, authenticate: "Authenticate", reauthenticate: "Re-authenticate", refresh: "Reconnect / refresh tools", "clear-cache": "Clear cached tools", tools: `${s.toolsOpen ? "Hide" : "Show"} tools` };
-    const disabled = (item.action === "authenticate" || item.action === "reauthenticate") && !this.callbacks.canAuthenticate(s.name);
+    const labels: Record<Action, string> = { status: `Connection status: ${this.statusText(s)}`, authenticate: "Authenticate", reauthenticate: "Re-authenticate", refresh: `${s.status === "connected" ? "Reconnect" : "Connect"} / refresh tools`, "clear-cache": "Clear cached tools", tools: `${s.toolsOpen ? "Hide" : "Show"} tools` };
+    const disabled = (item.action === "authenticate" || item.action === "reauthenticate") && !this.safeCanAuthenticate(s);
     return "  • " + (disabled ? color("2", labels[item.action]) : labels[item.action]);
   }
   private renderAdd(out: string[], row: (s?: string) => string, w: number) {
