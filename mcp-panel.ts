@@ -17,6 +17,7 @@ const CSI = "\x1b[";
 const color = (c: string, s: string) => `${CSI}${c}m${s}${CSI}0m`;
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 const msg = (e: unknown) => e instanceof Error ? e.message : String(e);
+const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
 const score = (q: string, s: string) => !q || s.toLowerCase().includes(q.toLowerCase());
 const envKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -391,7 +392,7 @@ class Panel {
     if (item.type === "add") return color("32", "+") + " Add MCP server";
     const s = item.type === "server" ? this.servers[item.s]! : this.servers[item.s]!;
     if (item.type === "server") return `${s.expanded ? "▾" : "▸"} ${s.status === "connected" ? color("32", "●") : s.status === "needs-auth" ? color("33", "●") : "○"} ${s.name} ${color("2", `(${this.scopeDetails(s)})`)}`;
-    if (item.type === "tool") { const t = s.tools[item.t]!; return `    ${t.direct ? color("32", "✓") : color("2", "○")} ${t.name}${t.description ? color("2", " — " + t.description) : ""}`; }
+    if (item.type === "tool") { const t = s.tools[item.t]!; return `    ${t.direct ? color("32", "✓") : color("2", "○")} ${oneLine(t.name)}${t.description ? color("2", " — " + oneLine(t.description)) : ""}`; }
     const labels: Record<Action, string> = { status: `Connection status: ${this.statusText(s)}`, authenticate: "Authenticate", reauthenticate: "Re-authenticate", refresh: `${s.status === "connected" ? "Reconnect" : "Connect for this session"} / refresh tools`, "clear-cache": "Clear cached tools", lifecycle: `Keep connected after reload: ${s.lifecycle === "keep-alive" ? "on" : "off"}`, tools: `${s.toolsOpen ? "Hide" : "Show"} tools` };
     const disabled = (item.action === "authenticate" || item.action === "reauthenticate") && !this.safeCanAuthenticate(s);
     return "  • " + (disabled ? color("2", labels[item.action]) : labels[item.action]);

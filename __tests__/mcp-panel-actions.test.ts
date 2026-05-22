@@ -74,6 +74,21 @@ describe("mcp-panel server actions", () => {
     panel.dispose();
   });
 
+  it("renders multiline tool descriptions as one overlay row", () => {
+    const cfg = config();
+    const cached = cache(cfg);
+    cached.servers.github.tools = [{ name: "API-get-user", description: "Notion | Retrieve a user\nError Responses:\n400: 400" }];
+    const panel = createMcpPanel(cfg, cached, new Map(), callbacks(), { requestRender: () => {} }, () => {});
+
+    panel.handleInput("\r");
+    down(panel, 7);
+
+    const output = stripAnsi(panel.render(100).join("\n"));
+    expect(output).toContain("Notion | Retrieve a user Error Responses: 400: 400");
+    expect(output).not.toContain("Retrieve a user\nError Responses");
+    panel.dispose();
+  });
+
   it("saves lifecycle changes for reload persistence", () => {
     const cfg: McpConfig = { mcpServers: { context7: { command: "npx", args: ["-y", "@upstash/context7-mcp"] } } };
     const cbs = callbacks();
