@@ -628,6 +628,39 @@ export function getServerProvenance(overridePath?: string, cwd = process.cwd()):
   return provenance;
 }
 
+export function writeServerLifecycleConfig(
+  changes: Map<string, "lazy" | "eager" | "keep-alive">,
+  provenance: Map<string, ServerProvenance>,
+  fullConfig: McpConfig,
+): void {
+  const byPath = new Map<string, { name: string; value: "lazy" | "eager" | "keep-alive"; prov: ServerProvenance }[]>();
+
+  for (const [serverName, value] of changes) {
+    const prov = provenance.get(serverName);
+    if (!prov) continue;
+    const targetPath = prov.path;
+    if (!byPath.has(targetPath)) byPath.set(targetPath, []);
+    byPath.get(targetPath)!.push({ name: serverName, value, prov });
+  }
+
+  for (const [filePath, entries] of byPath) {
+    const raw = readRawConfigObject(filePath);
+    const servers = getServersObject(raw);
+
+    for (const { name, value, prov } of entries) {
+      if (prov.kind === "import") {
+        const fullDef = fullConfig.mcpServers[name];
+        if (fullDef || servers[name]) servers[name] = { ...(fullDef ?? {}), ...(servers[name] ?? {}), lifecycle: value };
+      } else if (servers[name]) {
+        servers[name] = { ...servers[name], lifecycle: value };
+      }
+    }
+
+    setServersObject(raw, servers);
+    writeRawConfigObject(filePath, raw);
+  }
+}
+
 export function writeDirectToolsConfig(
   changes: Map<string, true | string[] | false>,
   provenance: Map<string, ServerProvenance>,

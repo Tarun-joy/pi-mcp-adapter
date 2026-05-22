@@ -228,7 +228,7 @@ describe("config discovery", () => {
       },
     });
 
-    const { getServerProvenance, loadMcpConfig, writeDirectToolsConfig, getPiGlobalConfigPath } = await import("../config.ts");
+    const { getServerProvenance, loadMcpConfig, writeDirectToolsConfig, writeServerLifecycleConfig, getPiGlobalConfigPath } = await import("../config.ts");
     const fullConfig = loadMcpConfig();
     const provenance = getServerProvenance();
 
@@ -246,6 +246,21 @@ describe("config discovery", () => {
 
     const projectConfig = JSON.parse(readFileSync(join(project, ".mcp.json"), "utf-8"));
     expect(projectConfig.mcpServers.projectServer).toMatchObject({ command: "project", directTools: ["search"] });
+
+    writeServerLifecycleConfig(
+      new Map([
+        ["genericServer", "keep-alive"],
+        ["projectServer", "keep-alive"],
+      ]),
+      provenance,
+      fullConfig,
+    );
+
+    const userConfigWithLifecycle = JSON.parse(readFileSync(getPiGlobalConfigPath(), "utf-8"));
+    expect(userConfigWithLifecycle.mcpServers.genericServer).toMatchObject({ command: "generic", directTools: true, lifecycle: "keep-alive" });
+
+    const projectConfigWithLifecycle = JSON.parse(readFileSync(join(project, ".mcp.json"), "utf-8"));
+    expect(projectConfigWithLifecycle.mcpServers.projectServer).toMatchObject({ command: "project", directTools: ["search"], lifecycle: "keep-alive" });
   });
 
   it("builds real diff previews for compatibility imports and shared server writes", async () => {

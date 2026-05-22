@@ -6,12 +6,12 @@ import type { MetadataCache, ServerCacheEntry, CachedTool } from "./metadata-cac
 
 type Status = "connected" | "idle" | "failed" | "needs-auth" | "connecting";
 type Item = { type: "add" } | { type: "server"; s: number } | { type: "action"; s: number; action: Action } | { type: "tool"; s: number; t: number };
-type Action = "status" | "authenticate" | "reauthenticate" | "refresh" | "clear-cache" | "tools";
+type Action = "status" | "authenticate" | "reauthenticate" | "refresh" | "clear-cache" | "lifecycle" | "tools";
 type Field = "name" | "transport" | "target" | "auth" | "scope" | "lifecycle" | "env";
 type PanelOptions = { noticeLines?: string[]; authOnly?: boolean; selectedText?: (text: string) => string };
 
-const ACTIONS: Action[] = ["status", "authenticate", "reauthenticate", "refresh", "clear-cache", "tools"];
-const NON_AUTH_ACTIONS: Action[] = ["status", "refresh", "clear-cache", "tools"];
+const ACTIONS: Action[] = ["status", "authenticate", "reauthenticate", "refresh", "clear-cache", "lifecycle", "tools"];
+const NON_AUTH_ACTIONS: Action[] = ["status", "refresh", "clear-cache", "lifecycle", "tools"];
 const FIELDS: Field[] = ["name", "transport", "target", "auth", "env", "scope", "lifecycle"];
 const CSI = "\x1b[";
 const color = (c: string, s: string) => `${CSI}${c}m${s}${CSI}0m`;
@@ -51,7 +51,7 @@ const tokens = (tool: CachedTool) => Math.ceil((tool.name.length + (tool.descrip
 const cycle = <T,>(xs: readonly T[], x: T, d: number) => xs[(Math.max(0, xs.indexOf(x)) + d + xs.length) % xs.length]!;
 
 interface ToolState { name: string; description: string; direct: boolean; wasDirect: boolean; tokens: number }
-interface ServerState { name: string; source: string; sourcePath?: string; importKind?: string; expanded: boolean; toolsOpen: boolean; status: Status; tools: ToolState[]; cached: boolean; exposeResources: boolean; excludeTools?: string[] }
+interface ServerState { name: string; source: string; sourcePath?: string; importKind?: string; expanded: boolean; toolsOpen: boolean; status: Status; tools: ToolState[]; cached: boolean; exposeResources: boolean; excludeTools?: string[]; lifecycle: "lazy" | "eager" | "keep-alive"; wasLifecycle: "lazy" | "eager" | "keep-alive" }
 interface Draft { name: string; transport: "http" | "stdio"; target: string; auth: "auto" | "oauth" | "none" | "bearer-env"; env: string; scope: "user" | "project"; lifecycle: "lazy" | "eager" | "keep-alive" }
 const newDraft = (): Draft => ({ name: "", transport: "http", target: "", auth: "auto", env: "", scope: "user", lifecycle: "lazy" });
 
@@ -117,7 +117,8 @@ class Panel {
           tools.push({ name: toolName, description: resource.description ?? `Read resource: ${resource.uri}`, direct, wasDirect: direct, tokens: tokens({ name: toolName, description: resource.description }) });
         }
       }
-      this.servers.push({ name, source: prov?.kind ?? "user", sourcePath: prov?.path, importKind: prov?.importKind, expanded: false, toolsOpen: true, status: callbacks.getConnectionStatus(name), tools, cached: !!sc, exposeResources: def.exposeResources !== false, excludeTools: def.excludeTools });
+      const lifecycle = def.lifecycle ?? "lazy";
+      this.servers.push({ name, source: prov?.kind ?? "user", sourcePath: prov?.path, importKind: prov?.importKind, expanded: false, toolsOpen: true, status: callbacks.getConnectionStatus(name), tools, cached: !!sc, exposeResources: def.exposeResources !== false, excludeTools: def.excludeTools, lifecycle, wasLifecycle: lifecycle });
     }
     this.rebuild();
     this.armTimer();
@@ -151,14 +152,17 @@ class Panel {
 
   private result(): McpPanelResult {
     const changes = new Map<string, true | string[] | false>();
+    const lifecycleChanges = new Map<string, "lazy" | "eager" | "keep-alive">();
     for (const server of this.servers) {
-      if (!server.tools.some(t => t.direct !== t.wasDirect)) continue;
-      const direct = server.tools.filter(t => t.direct).map(t => t.name);
-      changes.set(server.name, direct.length === server.tools.length && direct.length > 0 ? true : direct.length ? direct : false);
+      if (server.tools.some(t => t.direct !== t.wasDirect)) {
+        const direct = server.tools.filter(t => t.direct).map(t => t.name);
+        changes.set(server.name, direct.length === server.tools.length && direct.length > 0 ? true : direct.length ? direct : false);
+      }
+      if (server.lifecycle !== server.wasLifecycle) lifecycleChanges.set(server.name, server.lifecycle);
     }
-    return { cancelled: false, changes };
+    return { cancelled: false, changes, lifecycleChanges };
   }
-  private updateDirty() { this.dirty = this.servers.some(s => s.tools.some(t => t.direct !== t.wasDirect)); }
+  private updateDirty() { this.dirty = this.servers.some(s => s.tools.some(t => t.direct !== t.wasDirect) || s.lifecycle !== s.wasLifecycle); }
   private safeStatus(server: ServerState) {
     try { return this.callbacks.getConnectionStatus(server.name); }
     catch (e) { this.notice = `${server.name}: ${msg(e)}`; return "failed" as Status; }
@@ -209,6 +213,7 @@ class Panel {
     if (item.action === "reauthenticate") return this.authenticate(server, true);
     if (item.action === "refresh") return this.refresh(server);
     if (item.action === "clear-cache") return this.clear(server);
+    if (item.action === "lifecycle") return this.toggleLifecycle(server);
     server.toolsOpen = !server.toolsOpen; this.rebuild();
   }
 
@@ -271,6 +276,13 @@ class Panel {
       if (entry) this.rebuildTools(server, entry);
       server.cached = !!entry; this.notice = `${server.name}: ${this.statusText(server)}`; this.requestRender();
     }).catch(e => { server.status = "failed"; this.notice = `${server.name}: ${msg(e)}`; this.requestRender(); });
+  }
+  private toggleLifecycle(server: ServerState) {
+    server.lifecycle = server.lifecycle === "keep-alive" ? "lazy" : "keep-alive";
+    this.notice = `${server.name}: ${server.lifecycle === "keep-alive" ? "will connect on reload and stay alive" : "will connect only on demand"}. Press ctrl+s to save.`;
+    this.updateDirty();
+    this.rebuild();
+    this.requestRender();
   }
   private clear(server: ServerState) {
     if (!this.callbacks.clearServerCache) { this.notice = "Clear cache is unavailable."; return; }
@@ -380,7 +392,7 @@ class Panel {
     const s = item.type === "server" ? this.servers[item.s]! : this.servers[item.s]!;
     if (item.type === "server") return `${s.expanded ? "▾" : "▸"} ${s.status === "connected" ? color("32", "●") : s.status === "needs-auth" ? color("33", "●") : "○"} ${s.name} ${color("2", `(${this.scopeDetails(s)})`)}`;
     if (item.type === "tool") { const t = s.tools[item.t]!; return `    ${t.direct ? color("32", "✓") : color("2", "○")} ${t.name}${t.description ? color("2", " — " + t.description) : ""}`; }
-    const labels: Record<Action, string> = { status: `Connection status: ${this.statusText(s)}`, authenticate: "Authenticate", reauthenticate: "Re-authenticate", refresh: `${s.status === "connected" ? "Reconnect" : "Connect"} / refresh tools`, "clear-cache": "Clear cached tools", tools: `${s.toolsOpen ? "Hide" : "Show"} tools` };
+    const labels: Record<Action, string> = { status: `Connection status: ${this.statusText(s)}`, authenticate: "Authenticate", reauthenticate: "Re-authenticate", refresh: `${s.status === "connected" ? "Reconnect" : "Connect for this session"} / refresh tools`, "clear-cache": "Clear cached tools", lifecycle: `Keep connected after reload: ${s.lifecycle === "keep-alive" ? "on" : "off"}`, tools: `${s.toolsOpen ? "Hide" : "Show"} tools` };
     const disabled = (item.action === "authenticate" || item.action === "reauthenticate") && !this.safeCanAuthenticate(s);
     return "  • " + (disabled ? color("2", labels[item.action]) : labels[item.action]);
   }

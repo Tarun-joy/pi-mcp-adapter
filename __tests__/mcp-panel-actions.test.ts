@@ -53,6 +53,7 @@ describe("mcp-panel server actions", () => {
     expect(output).toContain("Re-authenticate");
     expect(output).toContain("Reconnect / refresh tools");
     expect(output).toContain("Clear cached tools");
+    expect(output).toContain("Keep connected after reload");
     panel.dispose();
   });
 
@@ -67,9 +68,46 @@ describe("mcp-panel server actions", () => {
 
     const output = stripAnsi(panel.render(100).join("\n"));
     expect(output).toContain("Connection status: not connected");
-    expect(output).toContain("Connect / refresh tools");
+    expect(output).toContain("Connect for this session / refresh tools");
     expect(output).not.toContain("Authenticate");
     expect(output).not.toContain("Re-authenticate");
+    panel.dispose();
+  });
+
+  it("saves lifecycle changes for reload persistence", () => {
+    const cfg: McpConfig = { mcpServers: { context7: { command: "npx", args: ["-y", "@upstash/context7-mcp"] } } };
+    const cbs = callbacks();
+    cbs.canAuthenticate = () => false;
+    cbs.getConnectionStatus = () => "idle";
+    const done = vi.fn();
+    const panel = createMcpPanel(cfg, cache({ mcpServers: { github: cfg.mcpServers.context7 } }), new Map(), cbs, { requestRender: () => {} }, done);
+
+    panel.handleInput("\r");
+    down(panel, 4);
+    panel.handleInput("\r");
+    panel.handleInput("\x13");
+
+    expect(done).toHaveBeenCalledWith(expect.objectContaining({
+      cancelled: false,
+      lifecycleChanges: new Map([["context7", "keep-alive"]]),
+    }));
+    panel.dispose();
+  });
+
+  it("keeps stdio env-token servers usable without OAuth actions", () => {
+    const cfg: McpConfig = { mcpServers: { notionApi: { command: "npx", args: ["-y", "@notionhq/notion-mcp-server"], env: { NOTION_TOKEN: "test" } } } };
+    const cbs = callbacks();
+    cbs.canAuthenticate = () => false;
+    cbs.getConnectionStatus = () => "idle";
+    const panel = createMcpPanel(cfg, cache({ mcpServers: { github: cfg.mcpServers.notionApi } }), new Map(), cbs, { requestRender: () => {} }, () => {});
+
+    panel.handleInput("\r");
+
+    const output = stripAnsi(panel.render(100).join("\n"));
+    expect(output).toContain("notionApi");
+    expect(output).toContain("Connect for this session / refresh tools");
+    expect(output).not.toContain("Authenticate");
+    expect(output).not.toContain("MCP panel error");
     panel.dispose();
   });
 
@@ -107,7 +145,7 @@ describe("mcp-panel server actions", () => {
     const panel = createMcpPanel(cfg, cache(cfg), new Map(), callbacks(), { requestRender: () => {} }, done);
 
     panel.handleInput("\r");
-    down(panel, 7);
+    down(panel, 8);
     panel.handleInput("\r");
 
     expect(done).not.toHaveBeenCalled();

@@ -383,6 +383,7 @@ export interface McpPanelCallbacks {
 
 export interface McpPanelResult {
   changes: Map<string, true | string[] | false>;
+  lifecycleChanges?: Map<string, "lazy" | "eager" | "keep-alive">;
   cancelled: boolean;
   addedServer?: string;
 }

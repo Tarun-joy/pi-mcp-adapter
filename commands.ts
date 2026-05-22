@@ -11,6 +11,7 @@ import {
   previewSharedServerEntry,
   previewStarterProjectConfig,
   writeDirectToolsConfig,
+  writeServerLifecycleConfig,
   writeSharedServerEntry,
   writeStarterProjectConfig,
 } from "./config.ts";
@@ -416,6 +417,11 @@ export async function openMcpPanel(
             writeDirectToolsConfig(result.changes, provenanceMap, config);
             configChanged = true;
             ctx.ui.notify("Direct tools updated. Pi will reload after this panel closes.", "info");
+          }
+          if (!result.cancelled && result.lifecycleChanges && result.lifecycleChanges.size > 0) {
+            writeServerLifecycleConfig(result.lifecycleChanges, provenanceMap, config);
+            configChanged = true;
+            ctx.ui.notify("MCP server lifecycle updated. Pi will reload after this panel closes.", "info");
           }
           if (!result.cancelled && result.addedServer) {
             configChanged = true;
