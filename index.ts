@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolInfo } from "@earendil-works/pi-coding-agent";
 import type { McpExtensionState } from "./state.ts";
 import { Type } from "typebox";
 import { showStatus, showTools, reconnectServers, authenticateServer, logoutServer, openMcpAuthPanel, openMcpPanel, openMcpSetup } from "./commands.ts";
@@ -15,7 +15,6 @@ export default function mcpAdapter(pi: ExtensionAPI) {
   let state: McpExtensionState | null = null;
   let initPromise: Promise<McpExtensionState> | null = null;
   let lifecycleGeneration = 0;
-  let currentCtx: ExtensionContext | null = null;
 
   async function shutdownState(currentState: McpExtensionState | null, reason: string): Promise<void> {
     if (!currentState) return;
@@ -81,44 +80,12 @@ export default function mcpAdapter(pi: ExtensionAPI) {
 
   const getPiTools = (): ToolInfo[] => pi.getAllTools();
 
-  async function ensureMcpState(ctx: ExtensionContext): Promise<McpExtensionState | null> {
-    if (!state && initPromise) {
-      try {
-        state = await initPromise;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (ctx.hasUI) ctx.ui.notify(`MCP initialization failed: ${message}`, "error");
-        return null;
-      }
-    }
-    if (!state) {
-      if (ctx.hasUI) ctx.ui.notify("MCP not initialized", "error");
-      return null;
-    }
-    return state;
-  }
-
-  async function openMcpStatusPanel(ctx: ExtensionContext): Promise<void> {
-    const currentState = await ensureMcpState(ctx);
-    if (!currentState) return;
-    if (!ctx.hasUI) {
-      await showStatus(currentState, ctx);
-      return;
-    }
-    const result = await openMcpPanel(currentState, pi, ctx, earlyConfigPath);
-    if (!result?.configChanged) return;
-    const maybeReload = (ctx as ExtensionContext & { reload?: () => Promise<void> }).reload;
-    if (typeof maybeReload === "function") await maybeReload.call(ctx);
-    else ctx.ui.notify("MCP config changed. Run /reload to apply it.", "info");
-  }
-
   pi.registerFlag("mcp-config", {
     description: "Path to MCP config file",
     type: "string",
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    currentCtx = ctx;
     const generation = ++lifecycleGeneration;
     const previousState = state;
     state = null;
@@ -169,8 +136,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     });
   });
 
-  pi.on("session_shutdown", async (_event, ctx) => {
-    if (currentCtx === ctx) currentCtx = null;
+  pi.on("session_shutdown", async () => {
     ++lifecycleGeneration;
     const currentState = state;
     state = null;
@@ -186,19 +152,22 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     }
   });
 
-  pi.events?.on?.("mcp:open-panel", () => {
-    const ctx = currentCtx;
-    if (!ctx) return;
-    void openMcpStatusPanel(ctx).catch((error) => {
-      if (ctx.hasUI) ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-    });
-  });
-
   pi.registerCommand("mcp", {
     description: "Show MCP server status",
     handler: async (args, ctx) => {
-      const currentState = await ensureMcpState(ctx);
-      if (!currentState) return;
+      if (!state && initPromise) {
+        try {
+          state = await initPromise;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (ctx.hasUI) ctx.ui.notify(`MCP initialization failed: ${message}`, "error");
+          return;
+        }
+      }
+      if (!state) {
+        if (ctx.hasUI) ctx.ui.notify("MCP not initialized", "error");
+        return;
+      }
 
       const parts = args?.trim()?.split(/\s+/) ?? [];
       const subcommand = parts[0] ?? "";
@@ -207,13 +176,13 @@ export default function mcpAdapter(pi: ExtensionAPI) {
 
       switch (subcommand) {
         case "reconnect":
-          await reconnectServers(currentState, ctx, targetServer);
+          await reconnectServers(state, ctx, targetServer);
           break;
         case "tools":
-          await showTools(currentState, ctx);
+          await showTools(state, ctx);
           break;
         case "setup": {
-          const result = await openMcpSetup(currentState, pi, ctx, earlyConfigPath, "setup");
+          const result = await openMcpSetup(state, pi, ctx, earlyConfigPath, "setup");
           if (result?.configChanged) {
             await ctx.reload();
             return;
@@ -226,13 +195,21 @@ export default function mcpAdapter(pi: ExtensionAPI) {
             if (ctx.hasUI) ctx.ui.notify("Usage: /mcp logout <server>", "error");
             return;
           }
-          await logoutServer(serverName, currentState, ctx);
+          await logoutServer(serverName, state, ctx);
           break;
         }
         case "status":
         case "":
         default:
-          await openMcpStatusPanel(ctx);
+          if (ctx.hasUI) {
+            const result = await openMcpPanel(state, pi, ctx, earlyConfigPath);
+            if (result?.configChanged) {
+              await ctx.reload();
+              return;
+            }
+          } else {
+            await showStatus(state, ctx);
+          }
           break;
       }
     },
