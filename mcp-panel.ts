@@ -20,6 +20,7 @@ const msg = (e: unknown) => e instanceof Error ? e.message : String(e);
 const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
 const score = (q: string, s: string) => !q || s.toLowerCase().includes(q.toLowerCase());
 const envKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const serverNamePattern = /^[A-Za-z0-9_.-]+$/;
 
 function textInput(data: string): string {
   if (data === "\r" || data === "\n" || data === "\t") return "";
@@ -30,6 +31,10 @@ function textInput(data: string): string {
 
 function isPastedText(data: string, input: string): boolean {
   return input.length > 0 && (data.length > 1 || data.includes("\x1b[200~") || data.includes("\x1b[201~"));
+}
+
+function normalizeServerName(input: string): string {
+  return input.trim().replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
 function parseEnvInput(input: string): Record<string, string> | undefined {
@@ -55,6 +60,46 @@ interface ToolState { name: string; description: string; direct: boolean; wasDir
 interface ServerState { name: string; source: string; sourcePath?: string; importKind?: string; expanded: boolean; toolsOpen: boolean; status: Status; tools: ToolState[]; cached: boolean; exposeResources: boolean; excludeTools?: string[]; lifecycle: "lazy" | "eager" | "keep-alive"; wasLifecycle: "lazy" | "eager" | "keep-alive" }
 interface Draft { name: string; transport: "http" | "stdio"; target: string; auth: "auto" | "oauth" | "none" | "bearer-env"; env: string; scope: "user" | "project"; lifecycle: "lazy" | "eager" | "keep-alive" }
 const newDraft = (): Draft => ({ name: "", transport: "http", target: "", auth: "auto", env: "", scope: "user", lifecycle: "lazy" });
+
+function parsePastedMcpConfig(input: string): { name: string; entry: ServerEntry } | undefined {
+  const text = input.trim();
+  if (!text || !(text.startsWith("{") || text.startsWith('"'))) return undefined;
+  const candidates = [text];
+  if (!text.startsWith("{")) candidates.push(`{${text}}`);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (!parsed || typeof parsed !== "object") continue;
+      const root = parsed as { mcpServers?: unknown };
+      const servers = root.mcpServers && typeof root.mcpServers === "object" ? root.mcpServers as Record<string, unknown> : parsed as Record<string, unknown>;
+      const first = Object.entries(servers).find(([, value]) => value && typeof value === "object");
+      if (!first) continue;
+      const [rawName, rawEntry] = first;
+      const entry = rawEntry as ServerEntry;
+      if (!entry.command && !entry.url) continue;
+      const name = normalizeServerName(rawName);
+      if (!name) continue;
+      return { name, entry };
+    } catch {}
+  }
+  return undefined;
+}
+
+function envToDraftText(env: Record<string, string> | undefined): string {
+  return Object.entries(env ?? {}).map(([key, value]) => `${key}=${value}`).join(" ");
+}
+
+function applyEntryToDraft(d: Draft, name: string, entry: ServerEntry): Draft {
+  return {
+    ...d,
+    name,
+    transport: entry.url ? "http" : "stdio",
+    target: entry.url ?? [entry.command, ...(entry.args ?? [])].filter(Boolean).join(" "),
+    auth: entry.auth === "oauth" ? "oauth" : entry.auth === false ? "none" : entry.auth === "bearer" && entry.bearerTokenEnv ? "bearer-env" : d.auth,
+    env: entry.auth === "bearer" && entry.bearerTokenEnv ? entry.bearerTokenEnv : envToDraftText(entry.env),
+    lifecycle: entry.lifecycle ?? d.lifecycle,
+  };
+}
 
 function entryFromDraft(d: Draft): ServerEntry {
   const parts = d.target.trim().split(/\s+/).filter(Boolean);
@@ -307,7 +352,10 @@ class Panel {
   private handleAdd(data: string) {
     const field = FIELDS[this.field]!;
     const input = textInput(data);
-    if (isPastedText(data, input)) return this.appendField(field, input);
+    if (isPastedText(data, input)) {
+      if (this.applyPastedConfig(input)) return;
+      return this.appendField(field, input);
+    }
     if (matchesKey(data, "ctrl+c")) return this.close(true);
     if (matchesKey(data, "escape")) { this.addMode = false; this.notice = ""; return; }
     if (matchesKey(data, "up")) { this.field = Math.max(0, this.field - 1); return; }
@@ -322,6 +370,15 @@ class Panel {
     if (field === "target") this.draft.target += input;
     if (field === "env") this.draft.env += input;
   }
+  private applyPastedConfig(input: string): boolean {
+    const parsed = parsePastedMcpConfig(input);
+    if (!parsed) return false;
+    this.draft = applyEntryToDraft(this.draft, parsed.name, parsed.entry);
+    this.field = FIELDS.indexOf("lifecycle");
+    this.notice = `Loaded ${parsed.name} from pasted MCP JSON. Press Enter to add.`;
+    this.requestRender();
+    return true;
+  }
   private cycleField(field: Field, d: number) {
     if (field === "transport") this.draft.transport = cycle(["http", "stdio"], this.draft.transport, d);
     if (field === "auth") this.draft.auth = cycle(["auto", "oauth", "none", "bearer-env"], this.draft.auth, d);
@@ -329,9 +386,11 @@ class Panel {
     if (field === "lifecycle") this.draft.lifecycle = cycle(["lazy", "eager", "keep-alive"], this.draft.lifecycle, d);
   }
   private submitAdd() {
-    const name = this.draft.name.trim();
+    const rawName = this.draft.name.trim();
+    const name = normalizeServerName(rawName);
     if (!this.callbacks.addServer) { this.notice = "Add server is unavailable."; return; }
-    if (!/^[A-Za-z0-9_.-]+$/.test(name)) { this.notice = "Invalid server name."; return; }
+    if (!name || !serverNamePattern.test(name)) { this.notice = "Invalid server name. Use letters, numbers, dot, underscore, or dash."; return; }
+    if (name !== rawName) this.draft.name = name;
     if (!this.draft.target.trim()) { this.notice = "Target is required."; return; }
     let entry: ServerEntry;
     try { entry = entryFromDraft(this.draft); }
@@ -399,7 +458,7 @@ class Panel {
   }
   private renderAdd(out: string[], row: (s?: string) => string, w: number) {
     const values: Record<Field, string> = { name: this.draft.name || color("2;3", "my-server"), transport: this.draft.transport, target: this.draft.target || color("2;3", this.draft.transport === "http" ? "https://example.com/mcp" : "npx -y package"), auth: this.draft.auth, env: this.draft.env || color("2;3", "KEY=value or TOKEN_ENV for bearer-env"), scope: this.draft.scope, lifecycle: this.draft.lifecycle };
-    out.push(row(color("2", "Enter text; left/right cycles options; env supports KEY=value pairs")));
+    out.push(row(color("2", "Enter text; paste MCP JSON anywhere; left/right cycles options; env supports KEY=value pairs")));
     for (let i = 0; i < FIELDS.length; i++) out.push(row(`${i === this.field ? this.selected("›") : " "} ${FIELDS[i]!.padEnd(10)} ${values[FIELDS[i]!]}`));
     out.push(row(color("2", "Enter on lifecycle adds server. User scope writes gitignored private Pi config.")));
     out.push(color("2", "╰" + "─".repeat(w) + "╯"));

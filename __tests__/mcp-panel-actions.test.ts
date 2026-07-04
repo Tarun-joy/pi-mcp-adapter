@@ -245,4 +245,54 @@ describe("mcp-panel server actions", () => {
     );
     panel.dispose();
   });
+
+  it("normalizes server names with spaces before adding", async () => {
+    const cfg = config();
+    const cbs = callbacks();
+    cbs.addServer = vi.fn(async () => {});
+    const panel = createMcpPanel(cfg, cache(cfg), new Map(), cbs, { requestRender: () => {} }, () => {});
+
+    panel.handleInput("a");
+    for (const ch of "chrome devtools") panel.handleInput(ch);
+    panel.handleInput("\r"); // transport
+    panel.handleInput("\x1b[C"); // stdio
+    panel.handleInput("\r"); // target
+    panel.handleInput("\x1b[200~npx -y chrome-devtools-mcp@latest\x1b[201~");
+    panel.handleInput("\r"); // auth
+    panel.handleInput("\r"); // env
+    panel.handleInput("\r"); // scope
+    panel.handleInput("\r"); // lifecycle
+    panel.handleInput("\r"); // submit
+    await Promise.resolve();
+
+    expect(cbs.addServer).toHaveBeenCalledWith(
+      "chrome-devtools",
+      expect.objectContaining({ command: "npx", args: ["-y", "chrome-devtools-mcp@latest"] }),
+      "user",
+    );
+    panel.dispose();
+  });
+
+  it("loads a pasted MCP JSON server config into the add form", async () => {
+    const cfg = config();
+    const cbs = callbacks();
+    cbs.addServer = vi.fn(async () => {});
+    const panel = createMcpPanel(cfg, cache(cfg), new Map(), cbs, { requestRender: () => {} }, () => {});
+
+    panel.handleInput("a");
+    panel.handleInput('\x1b[200~{"mcpServers":{"chrome-devtools":{"command":"npx","args":["-y","chrome-devtools-mcp@latest","--no-usage-statistics"],"lifecycle":"lazy"}}}\x1b[201~');
+    panel.handleInput("\r"); // submit from lifecycle field
+    await Promise.resolve();
+
+    expect(cbs.addServer).toHaveBeenCalledWith(
+      "chrome-devtools",
+      expect.objectContaining({
+        command: "npx",
+        args: ["-y", "chrome-devtools-mcp@latest", "--no-usage-statistics"],
+        lifecycle: "lazy",
+      }),
+      "user",
+    );
+    panel.dispose();
+  });
 });
