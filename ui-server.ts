@@ -244,7 +244,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
           resource: options.resource,
           allowAttribute: buildAllowAttribute(options.resource.meta.permissions),
           requireToolConsent: options.consentManager.requiresPrompt(options.serverName),
-          cacheToolConsent: options.consentManager.shouldCacheConsent(),
+          cacheToolConsent: options.consentManager.canCacheConsent(),
           hostContext,
         });
 

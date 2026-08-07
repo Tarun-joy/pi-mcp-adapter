@@ -17,7 +17,7 @@ describe("ConsentManager", () => {
     it("should not cache consent", () => {
       // "never" mode means no consent needed, so caching is irrelevant
       // but the API returns true for consistency
-      expect(manager.shouldCacheConsent()).toBe(true);
+      expect(manager.canCacheConsent()).toBe(true);
     });
 
     it("ensureApproved never throws", () => {
@@ -56,7 +56,7 @@ describe("ConsentManager", () => {
     });
 
     it("should cache consent", () => {
-      expect(manager.shouldCacheConsent()).toBe(true);
+      expect(manager.canCacheConsent()).toBe(true);
     });
 
     it("ensureApproved throws for unapproved server", () => {
@@ -109,7 +109,7 @@ describe("ConsentManager", () => {
     });
 
     it("should not cache consent", () => {
-      expect(manager.shouldCacheConsent()).toBe(false);
+      expect(manager.canCacheConsent()).toBe(false);
     });
 
     it("ensureApproved consumes the approval", () => {

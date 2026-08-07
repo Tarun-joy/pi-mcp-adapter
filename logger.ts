@@ -58,12 +58,12 @@ class Logger {
     this.handlers = [];
   }
 
-  private shouldLog(level: LogLevel): boolean {
+  private canLog(level: LogLevel): boolean {
     return LEVEL_PRIORITY[level] >= LEVEL_PRIORITY[this.minLevel];
   }
 
   private emit(level: LogLevel, message: string, context?: LogContext, error?: Error): void {
-    if (!this.shouldLog(level)) return;
+    if (!this.canLog(level)) return;
 
     const entry: LogEntry = {
       level,
