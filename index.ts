@@ -61,7 +61,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         envRaw?.split(",").map(s => s.trim()).filter(Boolean),
       );
   const missingConfiguredDirectToolServers = getMissingConfiguredDirectToolServers(earlyConfig, earlyCache);
-  const shouldRegisterProxyTool =
+  const canRegisterProxyTool =
     earlyConfig.settings?.disableProxyTool !== true
     || directSpecs.length === 0
     || missingConfiguredDirectToolServers.length > 0;
@@ -246,7 +246,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     },
   });
 
-  if (shouldRegisterProxyTool) {
+  if (canRegisterProxyTool) {
     (pi.registerTool as (tool: unknown) => unknown)({
       name: "mcp",
       label: "MCP",

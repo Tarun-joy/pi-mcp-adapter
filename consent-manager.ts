@@ -19,7 +19,7 @@ export class ConsentManager {
     return !this.approvedServers.has(serverName);
   }
 
-  shouldCacheConsent(): boolean {
+  canCacheConsent(): boolean {
     return this.mode !== "always";
   }
 
