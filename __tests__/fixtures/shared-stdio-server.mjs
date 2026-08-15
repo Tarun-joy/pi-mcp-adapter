@@ -19,6 +19,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));
 server.setRequestHandler(CallToolRequestSchema, async request => {
   const delay = Number(request.params.arguments?.delay ?? 0);
+  const progressToken = request.params._meta?.progressToken;
+  if (progressToken !== undefined) {
+    await server.notification({
+      method: "notifications/progress",
+      params: { progressToken, progress: delay || 1, total: delay || 1 },
+    });
+  }
   if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
   calls++;
   return { content: [{ type: "text", text: JSON.stringify({ pid: process.pid, calls }) }] };

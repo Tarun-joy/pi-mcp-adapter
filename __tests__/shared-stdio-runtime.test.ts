@@ -115,6 +115,21 @@ describe("shared stdio runtime", () => {
     expect(first.pid).toBe(second.pid);
   });
 
+  it("routes colliding client progress tokens to their originating clients", async () => {
+    const hash = "f".repeat(64);
+    const [first, second] = await Promise.all([connect(hash), connect(hash)]);
+    const firstProgress: number[] = [];
+    const secondProgress: number[] = [];
+
+    await Promise.all([
+      first.callTool({ name: "identity", arguments: { delay: 11 } }, undefined, { onprogress: progress => firstProgress.push(progress.progress) }),
+      second.callTool({ name: "identity", arguments: { delay: 22 } }, undefined, { onprogress: progress => secondProgress.push(progress.progress) }),
+    ]);
+
+    expect(firstProgress).toEqual([11]);
+    expect(secondProgress).toEqual([22]);
+  });
+
   it("multiplexes concurrent clients through one upstream process", async () => {
     const hash = "a".repeat(64);
     const [first, second] = await Promise.all([connect(hash), connect(hash)]);

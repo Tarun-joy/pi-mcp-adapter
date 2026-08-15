@@ -228,6 +228,16 @@ async function routeUpstreamMessage(message) {
     }
   }
 
+  if (isNotification && message.method === "notifications/cancelled") {
+    const route = requestRoutes.get(idKey(message.params?.requestId));
+    if (route) {
+      const restored = clone(message);
+      restored.params = { ...restored.params, requestId: route.originalId };
+      sendMessage(route.client, restored);
+      return;
+    }
+  }
+
   if (isNotification) for (const client of clients.values()) if (client.initialized) sendMessage(client, message);
 }
 
