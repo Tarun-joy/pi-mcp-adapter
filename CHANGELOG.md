@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Serialized interactive OAuth per server across Pi processes so concurrent sessions cannot replace state, client registration, or PKCE data during token exchange.
+- Allowed blocked server rows to expand in the MCP panel so Authenticate and Re-authenticate remain explicitly selectable.
 - Isolated interactive OAuth state from background reconnect providers so keep-alive probes cannot overwrite an in-flight PKCE verifier.
 - Preserved OAuth authorization failures as `needs-auth` connection state and stopped keep-alive retry storms while user action is required.
 - Reconnected OAuth servers immediately after interactive authentication so the MCP panel reflects the new credentials without a second action.
