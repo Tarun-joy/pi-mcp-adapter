@@ -1,15 +1,10 @@
 // types.ts - Core type definitions
-import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import type { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import type { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Transport as McpTransport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { TextContent, ImageContent } from "@earendil-works/pi-ai";
 import type { UiStreamMode } from "./ui-stream-types.ts";
 
-// Transport type (stdio + HTTP)
-export type Transport = 
-  | StdioClientTransport 
-  | SSEClientTransport 
-  | StreamableHTTPClientTransport;
+// MCP transport contract (stdio, shared stdio, and HTTP)
+export type Transport = McpTransport;
 
 // Import sources for config
 export type ImportKind = 
@@ -300,6 +295,11 @@ export interface ServerEntry {
    */
   oauth?: OAuthConfig | false;
   lifecycle?: "keep-alive" | "lazy" | "eager";
+  /**
+   * Process ownership for stdio servers. Shared runtimes multiplex one stateless
+   * server process across Pi sessions. HTTP servers always use session clients.
+   */
+  runtime?: "session" | "shared";
   idleTimeout?: number; // minutes, overrides global setting
   // Resource handling
   exposeResources?: boolean;

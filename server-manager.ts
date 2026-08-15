@@ -13,6 +13,8 @@ import type {
 } from "./types.ts";
 import { serverStreamResultPatchNotificationSchema } from "./types.ts";
 import { resolveNpxBinary } from "./npx-resolver.ts";
+import { computeServerHash } from "./metadata-cache.ts";
+import { SharedStdioClientTransport } from "./shared-stdio-transport.ts";
 import { logger } from "./logger.ts";
 import { McpOAuthProvider } from "./mcp-oauth-provider.ts";
 import { supportsOAuth } from "./mcp-auth-flow.ts";
@@ -76,7 +78,8 @@ export class McpServerManager {
     name: string,
     definition: ServerDefinition
   ): Promise<ServerConnection> {
-    const client = this.createClient(name);
+    const sharedRuntime = definition.command !== undefined && definition.runtime === "shared";
+    const client = this.createClient(name, sharedRuntime);
     
     let transport: Transport;
     
@@ -93,13 +96,20 @@ export class McpServerManager {
         }
       }
 
-      transport = new StdioClientTransport({
+      const stdioDefinition = {
         command,
         args,
         env: resolveEnv(definition.env),
         cwd: resolveConfigPath(definition.cwd),
-        stderr: definition.debug ? "inherit" : "ignore",
-      });
+        stderr: definition.debug ? "inherit" as const : "ignore" as const,
+      };
+      transport = sharedRuntime
+        ? new SharedStdioClientTransport({
+            serverName: name,
+            definitionHash: computeServerHash(definition),
+            definition: stdioDefinition,
+          })
+        : new StdioClientTransport(stdioDefinition);
     } else if (definition.url) {
       // HTTP transport with fallback
       const resolution = await this.createHttpTransport(definition, name);
@@ -163,13 +173,14 @@ export class McpServerManager {
     };
   }
 
-  private createClient(serverName: string): Client {
+  private createClient(serverName: string, sharedRuntime = false): Client {
+    const samplingConfig = sharedRuntime ? undefined : this.samplingConfig;
     const client = new Client(
       { name: `pi-mcp-${serverName}`, version: "1.0.0" },
-      this.samplingConfig ? { capabilities: { sampling: {} } } : undefined,
+      samplingConfig ? { capabilities: { sampling: {} } } : undefined,
     );
-    if (this.samplingConfig) {
-      registerSamplingHandler(client, { ...this.samplingConfig, serverName });
+    if (samplingConfig) {
+      registerSamplingHandler(client, { ...samplingConfig, serverName });
     }
     return client;
   }
