@@ -18,6 +18,8 @@ import {
   stopCallbackServer,
 } from "./mcp-callback-server.ts"
 import {
+  acquireOAuthFlowLock,
+  releaseOAuthFlowLock,
   getAuthForUrl,
   isTokenExpired,
   hasStoredTokens,
@@ -161,74 +163,85 @@ export async function completeAuth(
  * @param definition - The server definition (optional)
  * @returns The final auth status
  */
+export interface AuthenticateOptions {
+  resetCredentials?: boolean
+}
+
+async function clearAuthenticationState(serverName: string): Promise<void> {
+  const oauthState = await getOAuthState(serverName)
+  if (oauthState) cancelPendingCallback(oauthState)
+
+  const pendingTransport = pendingTransports.get(serverName)
+  if (pendingTransport) {
+    pendingTransports.delete(serverName)
+    await pendingTransport.close().catch(() => {})
+  }
+
+  clearAllCredentials(serverName)
+  await clearOAuthState(serverName)
+}
+
 export async function authenticate(
   serverName: string,
   serverUrl: string,
   definition?: ServerEntry,
+  options: AuthenticateOptions = {},
 ): Promise<AuthStatus> {
   const inFlight = pendingAuthentications.get(serverName)
-  if (inFlight) {
-    return inFlight
-  }
+  if (inFlight) return inFlight
 
   const operation = (async (): Promise<AuthStatus> => {
-    // Start auth flow
-    const { authorizationUrl } = await startAuth(serverName, serverUrl, definition)
-
-    // If no auth URL needed, already authenticated
-    if (!authorizationUrl) {
-      return "authenticated"
-    }
-
-    // Get the state that was already generated and stored in startAuth()
-    const oauthState = await getOAuthState(serverName)
-    if (!oauthState) {
-      throw new Error("OAuth state not found - this should not happen")
-    }
-
-    // Register the callback BEFORE opening the browser
-    const callbackPromise = waitForCallback(oauthState)
-
+    const lock = acquireOAuthFlowLock(serverName)
     try {
-      // Open browser
-      console.log(`MCP Auth: Opening browser for ${serverName}`)
+      if (options.resetCredentials) {
+        await clearAuthenticationState(serverName)
+      }
+
+      const { authorizationUrl } = await startAuth(serverName, serverUrl, definition)
+      if (!authorizationUrl) return "authenticated"
+
+      const oauthState = await getOAuthState(serverName)
+      if (!oauthState) {
+        throw new Error("OAuth state not found - this should not happen")
+      }
+
+      const callbackPromise = waitForCallback(oauthState)
       try {
-        await open(authorizationUrl)
-      } catch (error) {
-        console.warn(`MCP Auth: Failed to open browser for ${serverName}`, { error })
-        throw new Error(
-          `Could not open browser. Please open this URL manually: ${authorizationUrl}`,
-          { cause: error },
-        )
-      }
+        console.log(`MCP Auth: Opening browser for ${serverName}`)
+        try {
+          await open(authorizationUrl)
+        } catch (error) {
+          console.warn(`MCP Auth: Failed to open browser for ${serverName}`, { error })
+          throw new Error(
+            `Could not open browser. Please open this URL manually: ${authorizationUrl}`,
+            { cause: error },
+          )
+        }
 
-      // Wait for callback
-      const code = await callbackPromise
-
-      // Validate state
-      const storedState = await getOAuthState(serverName)
-      if (storedState !== oauthState) {
+        const code = await callbackPromise
+        const storedState = await getOAuthState(serverName)
+        if (storedState !== oauthState) {
+          await clearOAuthState(serverName)
+          throw new Error("OAuth state mismatch - potential CSRF attack")
+        }
         await clearOAuthState(serverName)
-        throw new Error("OAuth state mismatch - potential CSRF attack")
+        return await completeAuth(serverName, code)
+      } catch (error) {
+        cancelPendingCallback(oauthState)
+        await clearOAuthState(serverName)
+        const pendingTransport = pendingTransports.get(serverName)
+        if (pendingTransport) {
+          pendingTransports.delete(serverName)
+          await pendingTransport.close().catch(() => {})
+        }
+        throw error
       }
-      await clearOAuthState(serverName)
-
-      // Complete the auth
-      return await completeAuth(serverName, code)
-    } catch (error) {
-      cancelPendingCallback(oauthState)
-      await clearOAuthState(serverName)
-      const pendingTransport = pendingTransports.get(serverName)
-      if (pendingTransport) {
-        pendingTransports.delete(serverName)
-        await pendingTransport.close().catch(() => {})
-      }
-      throw error
+    } finally {
+      releaseOAuthFlowLock(lock)
     }
   })()
 
   pendingAuthentications.set(serverName, operation)
-
   try {
     return await operation
   } finally {
@@ -313,18 +326,13 @@ export async function getAuthStatus(serverName: string): Promise<AuthStatus> {
  * @param serverName - The name of the MCP server
  */
 export async function removeAuth(serverName: string): Promise<void> {
-  const oauthState = await getOAuthState(serverName)
-  if (oauthState) {
-    cancelPendingCallback(oauthState)
+  const lock = acquireOAuthFlowLock(serverName)
+  try {
+    await clearAuthenticationState(serverName)
+    console.log(`MCP Auth: Removed credentials for ${serverName}`)
+  } finally {
+    releaseOAuthFlowLock(lock)
   }
-  const pendingTransport = pendingTransports.get(serverName)
-  if (pendingTransport) {
-    pendingTransports.delete(serverName)
-    await pendingTransport.close().catch(() => {})
-  }
-  clearAllCredentials(serverName)
-  await clearOAuthState(serverName)
-  console.log(`MCP Auth: Removed credentials for ${serverName}`)
 }
 
 /**

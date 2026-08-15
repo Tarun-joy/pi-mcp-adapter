@@ -18,7 +18,7 @@ import {
 import { lazyConnect, updateMetadataCache, updateStatusBar, getFailureAgeSeconds } from "./init.ts";
 import { clearServerMetadataCache, loadMetadataCache } from "./metadata-cache.ts";
 import { buildToolMetadata } from "./tool-metadata.ts";
-import { supportsOAuth, authenticate, removeAuth } from "./mcp-auth-flow.ts";
+import { supportsOAuth, authenticate, removeAuth, type AuthenticateOptions } from "./mcp-auth-flow.ts";
 import { getAuthForUrl } from "./mcp-auth.ts";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.ts";
 import { openPath } from "./utils.ts";
@@ -143,6 +143,7 @@ export async function authenticateServer(
   serverName: string,
   state: McpExtensionState,
   ctx: ExtensionContext,
+  options: AuthenticateOptions = {},
   authenticateFn: typeof authenticate = authenticate,
 ): Promise<McpAuthResult> {
   if (!ctx.hasUI) return { ok: false, message: "OAuth authentication requires an interactive session." };
@@ -172,7 +173,7 @@ export async function authenticateServer(
 
   try {
     ctx.ui.setStatus("mcp-auth", `Authenticating ${serverName}...`);
-    const status = await authenticateFn(serverName, definition.url, definition);
+    const status = await authenticateFn(serverName, definition.url, definition, options);
 
     if (status === "authenticated") {
       await reconnectServers(state, ctx, serverName);
@@ -224,10 +225,14 @@ export async function reauthenticateServer(
   serverName: string,
   state: McpExtensionState,
   ctx: ExtensionContext,
+  authenticateFn: typeof authenticate = authenticate,
 ): Promise<McpAuthResult> {
-  const cleared = await logoutServer(serverName, state, ctx);
-  if (!cleared.ok) return { ok: false, message: cleared.message };
-  return authenticateServer(serverName, state, ctx);
+  if (!state.config.mcpServers[serverName]) {
+    return authenticateServer(serverName, state, ctx, {}, authenticateFn);
+  }
+  await state.manager.close(serverName);
+  updateStatusBar(state);
+  return authenticateServer(serverName, state, ctx, { resetCredentials: true }, authenticateFn);
 }
 
 export async function clearServerCache(
