@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SharedStdioClientTransport } from "../shared-stdio-transport.ts";
@@ -132,6 +132,17 @@ describe("shared stdio runtime", () => {
 
     await second.close();
     await waitFor(() => readdirSync(runtimeDir).filter(name => name.endsWith(".json")).length === 0);
+  });
+
+  it("recovers an abandoned startup lock without an owner record", async () => {
+    const hash = "e".repeat(64);
+    const lockPath = join(runtimeDir, `${hash.slice(0, 24)}.lock`);
+    mkdirSync(lockPath);
+    const stale = new Date(Date.now() - 2_000);
+    utimesSync(lockPath, stale, stale);
+
+    const client = await connect(hash);
+    await expect(identity(client)).resolves.toMatchObject({ calls: 1 });
   });
 
   it("replaces stale broker metadata even when its pid was reused", async () => {

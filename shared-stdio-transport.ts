@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -72,6 +72,11 @@ function parseOwner(path: string): { pid?: number } {
   catch { return {}; }
 }
 
+function isStaleOwnerlessLock(path: string): boolean {
+  try { return Date.now() - statSync(path).mtimeMs > 1_000; }
+  catch { return false; }
+}
+
 async function acquireStartupLock(lockPath: string): Promise<() => void> {
   const deadline = Date.now() + START_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -81,7 +86,7 @@ async function acquireStartupLock(lockPath: string): Promise<() => void> {
       return () => rmSync(lockPath, { recursive: true, force: true });
     } catch (error) {
       const owner = parseOwner(lockPath);
-      if (owner.pid && !isProcessAlive(owner.pid)) {
+      if ((owner.pid && !isProcessAlive(owner.pid)) || (!owner.pid && isStaleOwnerlessLock(lockPath))) {
         rmSync(lockPath, { recursive: true, force: true });
         continue;
       }
