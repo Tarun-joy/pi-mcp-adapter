@@ -109,7 +109,7 @@ describe("mcp-panel server actions", () => {
     panel.dispose();
   });
 
-  it("saves shared runtime ownership for stdio servers", () => {
+  it("cycles and saves scoped runtime ownership for stdio servers", () => {
     const cfg: McpConfig = { mcpServers: { docs: { command: "node", args: ["server.js"] } } };
     const cbs = callbacks();
     cbs.canAuthenticate = () => false;
@@ -120,11 +120,12 @@ describe("mcp-panel server actions", () => {
     panel.handleInput("\r");
     down(panel, 4);
     panel.handleInput("\r");
+    panel.handleInput("\r");
     panel.handleInput("\x13");
 
     expect(done).toHaveBeenCalledWith(expect.objectContaining({
       cancelled: false,
-      runtimeChanges: new Map([["docs", "project"]]),
+      runtimeChanges: new Map([["docs", "global"]]),
     }));
     panel.dispose();
   });
