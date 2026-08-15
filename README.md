@@ -140,6 +140,8 @@ Pi-specific files are the write targets for imported or shared global servers wh
 - **`eager`** — Connect at startup but don't auto-reconnect if the connection drops. No idle timeout by default (set `idleTimeout` explicitly to enable).
 - **`keep-alive`** — Connect at startup. Auto-reconnect via health checks. No idle timeout. Use for servers you always need available.
 
+Config scope and runtime ownership are independent. A user-global definition makes a server available to every Pi session, but each session still owns its connection; a stdio definition therefore starts one process per connected session. Prefer an official Streamable HTTP endpoint for globally used hosted services, and keep stdio servers `lazy` unless every session genuinely needs its own process.
+
 ### Settings
 
 ```json
