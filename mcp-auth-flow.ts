@@ -248,6 +248,10 @@ export async function authenticate(
     if (pendingAuthentications.get(serverName) === operation) {
       pendingAuthentications.delete(serverName)
     }
+    // Callback listeners are needed only while this process owns an interactive flow.
+    if (pendingAuthentications.size === 0) {
+      await stopCallbackServer()
+    }
   }
 }
 
