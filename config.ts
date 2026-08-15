@@ -628,19 +628,19 @@ export function getServerProvenance(overridePath?: string, cwd = process.cwd()):
   return provenance;
 }
 
-export function writeServerLifecycleConfig(
-  changes: Map<string, "lazy" | "eager" | "keep-alive">,
+function writeServerRuntimeProperty<T extends "lifecycle" | "runtime">(
+  property: T,
+  changes: Map<string, NonNullable<ServerEntry[T]>>,
   provenance: Map<string, ServerProvenance>,
   fullConfig: McpConfig,
 ): void {
-  const byPath = new Map<string, { name: string; value: "lazy" | "eager" | "keep-alive"; prov: ServerProvenance }[]>();
+  const byPath = new Map<string, { name: string; value: NonNullable<ServerEntry[T]>; prov: ServerProvenance }[]>();
 
   for (const [serverName, value] of changes) {
     const prov = provenance.get(serverName);
     if (!prov) continue;
-    const targetPath = prov.path;
-    if (!byPath.has(targetPath)) byPath.set(targetPath, []);
-    byPath.get(targetPath)!.push({ name: serverName, value, prov });
+    if (!byPath.has(prov.path)) byPath.set(prov.path, []);
+    byPath.get(prov.path)!.push({ name: serverName, value, prov });
   }
 
   for (const [filePath, entries] of byPath) {
@@ -650,15 +650,31 @@ export function writeServerLifecycleConfig(
     for (const { name, value, prov } of entries) {
       if (prov.kind === "import") {
         const fullDef = fullConfig.mcpServers[name];
-        if (fullDef || servers[name]) servers[name] = { ...(fullDef ?? {}), ...(servers[name] ?? {}), lifecycle: value };
+        if (fullDef || servers[name]) servers[name] = { ...(fullDef ?? {}), ...(servers[name] ?? {}), [property]: value };
       } else if (servers[name]) {
-        servers[name] = { ...servers[name], lifecycle: value };
+        servers[name] = { ...servers[name], [property]: value };
       }
     }
 
     setServersObject(raw, servers);
     writeRawConfigObject(filePath, raw);
   }
+}
+
+export function writeServerLifecycleConfig(
+  changes: Map<string, "lazy" | "eager" | "keep-alive">,
+  provenance: Map<string, ServerProvenance>,
+  fullConfig: McpConfig,
+): void {
+  writeServerRuntimeProperty("lifecycle", changes, provenance, fullConfig);
+}
+
+export function writeServerRuntimeConfig(
+  changes: Map<string, "session" | "project" | "global">,
+  provenance: Map<string, ServerProvenance>,
+  fullConfig: McpConfig,
+): void {
+  writeServerRuntimeProperty("runtime", changes, provenance, fullConfig);
 }
 
 export function writeDirectToolsConfig(

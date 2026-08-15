@@ -98,13 +98,34 @@ describe("mcp-panel server actions", () => {
     const panel = createMcpPanel(cfg, cache({ mcpServers: { github: cfg.mcpServers.context7 } }), new Map(), cbs, { requestRender: () => {} }, done);
 
     panel.handleInput("\r");
-    down(panel, 4);
+    down(panel, 5);
     panel.handleInput("\r");
     panel.handleInput("\x13");
 
     expect(done).toHaveBeenCalledWith(expect.objectContaining({
       cancelled: false,
       lifecycleChanges: new Map([["context7", "keep-alive"]]),
+    }));
+    panel.dispose();
+  });
+
+  it("cycles and saves scoped runtime ownership for stdio servers", () => {
+    const cfg: McpConfig = { mcpServers: { docs: { command: "node", args: ["server.js"] } } };
+    const cbs = callbacks();
+    cbs.canAuthenticate = () => false;
+    cbs.getConnectionStatus = () => "idle";
+    const done = vi.fn();
+    const panel = createMcpPanel(cfg, cache({ mcpServers: { github: cfg.mcpServers.docs } }), new Map(), cbs, { requestRender: () => {} }, done);
+
+    panel.handleInput("\r");
+    down(panel, 4);
+    panel.handleInput("\r");
+    panel.handleInput("\r");
+    panel.handleInput("\x13");
+
+    expect(done).toHaveBeenCalledWith(expect.objectContaining({
+      cancelled: false,
+      runtimeChanges: new Map([["docs", "global"]]),
     }));
     panel.dispose();
   });
@@ -133,10 +154,10 @@ describe("mcp-panel server actions", () => {
     ]);
     const panel = createMcpPanel(cfg, cache(cfg), provenance, callbacks(), { requestRender: () => {} }, () => {});
 
-    expect(stripAnsi(panel.render(100).join("\n"))).toContain("github (project, 1 tools)");
+    expect(stripAnsi(panel.render(100).join("\n"))).toContain("github (project, session, 1 tools)");
 
     panel.handleInput("\r");
-    expect(stripAnsi(panel.render(140).join("\n"))).toContain("github (project, 1 tools · /repo/.mcp.json)");
+    expect(stripAnsi(panel.render(140).join("\n"))).toContain("github (project, session, 1 tools · /repo/.mcp.json)");
     panel.dispose();
   });
 
@@ -160,7 +181,7 @@ describe("mcp-panel server actions", () => {
     const panel = createMcpPanel(cfg, cache(cfg), new Map(), callbacks(), { requestRender: () => {} }, done);
 
     panel.handleInput("\r");
-    down(panel, 8);
+    down(panel, 9);
     panel.handleInput("\r");
 
     expect(done).not.toHaveBeenCalled();
@@ -183,6 +204,7 @@ describe("mcp-panel server actions", () => {
     panel.handleInput("\r"); // auth
     panel.handleInput("\r"); // env
     panel.handleInput("\r"); // scope
+    panel.handleInput("\r"); // runtime
     panel.handleInput("\r"); // lifecycle
     panel.handleInput("\r"); // submit
     await Promise.resolve();
@@ -229,6 +251,7 @@ describe("mcp-panel server actions", () => {
     panel.handleInput("\r"); // env
     panel.handleInput("\x1b[200~NOTION_TOKEN=ntn_test_token\x1b[201~");
     panel.handleInput("\r"); // scope
+    panel.handleInput("\r"); // runtime
     panel.handleInput("\r"); // lifecycle
     panel.handleInput("\r"); // submit
     await Promise.resolve();
@@ -239,6 +262,7 @@ describe("mcp-panel server actions", () => {
         command: "npx",
         args: ["-y", "@notionhq/notion-mcp-server"],
         env: { NOTION_TOKEN: "ntn_test_token" },
+        runtime: "session",
         lifecycle: "lazy",
       }),
       "user",
@@ -261,6 +285,7 @@ describe("mcp-panel server actions", () => {
     panel.handleInput("\r"); // auth
     panel.handleInput("\r"); // env
     panel.handleInput("\r"); // scope
+    panel.handleInput("\r"); // runtime
     panel.handleInput("\r"); // lifecycle
     panel.handleInput("\r"); // submit
     await Promise.resolve();

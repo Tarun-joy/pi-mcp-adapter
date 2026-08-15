@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -13,6 +16,8 @@ import type {
 } from "./types.ts";
 import { serverStreamResultPatchNotificationSchema } from "./types.ts";
 import { resolveNpxBinary } from "./npx-resolver.ts";
+import { computeServerHash } from "./metadata-cache.ts";
+import { SharedStdioClientTransport } from "./shared-stdio-transport.ts";
 import { logger } from "./logger.ts";
 import { McpOAuthProvider } from "./mcp-oauth-provider.ts";
 import { supportsOAuth } from "./mcp-auth-flow.ts";
@@ -76,7 +81,8 @@ export class McpServerManager {
     name: string,
     definition: ServerDefinition
   ): Promise<ServerConnection> {
-    const client = this.createClient(name);
+    const sharedRuntime = definition.command !== undefined && definition.runtime !== undefined && definition.runtime !== "session";
+    const client = this.createClient(name, sharedRuntime);
     
     let transport: Transport;
     
@@ -93,13 +99,22 @@ export class McpServerManager {
         }
       }
 
-      transport = new StdioClientTransport({
+      const runtimeCwd = resolveSharedRuntimeCwd(definition);
+      const stdioDefinition = {
         command,
         args,
         env: resolveEnv(definition.env),
-        cwd: resolveConfigPath(definition.cwd),
-        stderr: definition.debug ? "inherit" : "ignore",
-      });
+        cwd: runtimeCwd,
+        stderr: definition.debug ? "inherit" as const : "ignore" as const,
+      };
+      const runtimeIdentity = computeSharedRuntimeIdentity(definition);
+      transport = sharedRuntime
+        ? new SharedStdioClientTransport({
+            serverName: name,
+            definitionHash: runtimeIdentity,
+            definition: stdioDefinition,
+          })
+        : new StdioClientTransport(stdioDefinition);
     } else if (definition.url) {
       // HTTP transport with fallback
       const resolution = await this.createHttpTransport(definition, name);
@@ -163,13 +178,14 @@ export class McpServerManager {
     };
   }
 
-  private createClient(serverName: string): Client {
+  private createClient(serverName: string, sharedRuntime = false): Client {
+    const samplingConfig = sharedRuntime ? undefined : this.samplingConfig;
     const client = new Client(
       { name: `pi-mcp-${serverName}`, version: "1.0.0" },
-      this.samplingConfig ? { capabilities: { sampling: {} } } : undefined,
+      samplingConfig ? { capabilities: { sampling: {} } } : undefined,
     );
-    if (this.samplingConfig) {
-      registerSamplingHandler(client, { ...this.samplingConfig, serverName });
+    if (samplingConfig) {
+      registerSamplingHandler(client, { ...samplingConfig, serverName });
     }
     return client;
   }
@@ -368,6 +384,25 @@ export class McpServerManager {
     if (connection.inFlight > 0) return false;
     return (Date.now() - connection.lastUsedAt) > timeoutMs;
   }
+}
+
+function canonicalizeCwd(cwd: string): string {
+  const absolute = resolve(cwd);
+  try { return realpathSync.native(absolute); }
+  catch { return absolute; }
+}
+
+export function resolveSharedRuntimeCwd(definition: ServerDefinition, sessionCwd = process.cwd()): string | undefined {
+  const configuredCwd = resolveConfigPath(definition.cwd);
+  if (definition.runtime === "project") return canonicalizeCwd(configuredCwd ?? sessionCwd);
+  return configuredCwd;
+}
+
+export function computeSharedRuntimeIdentity(definition: ServerDefinition, sessionCwd = process.cwd()): string {
+  const scopeCwd = definition.runtime === "project" ? resolveSharedRuntimeCwd(definition, sessionCwd) : "";
+  return createHash("sha256")
+    .update(`${computeServerHash(definition)}:${definition.runtime ?? "session"}:${scopeCwd}`)
+    .digest("hex");
 }
 
 /**

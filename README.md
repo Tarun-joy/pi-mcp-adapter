@@ -128,6 +128,7 @@ Pi-specific files are the write targets for imported or shared global servers wh
 | `oauth.grantType` | `"authorization_code"` (default) or `"client_credentials"` for non-interactive machine auth |
 | `bearerToken` / `bearerTokenEnv` | Token or env var name; `bearerToken` supports `${VAR}` and `$env:VAR` interpolation |
 | `lifecycle` | `"lazy"` (default), `"eager"`, or `"keep-alive"` |
+| `runtime` | Stdio process scope: `"session"` (default), `"project"`, or `"global"` |
 | `idleTimeout` | Minutes before idle disconnect (overrides global) |
 | `exposeResources` | Expose MCP resources as tools (default: true) |
 | `directTools` | `true`, `string[]`, or `false` — register tools individually instead of through proxy |
@@ -140,7 +141,26 @@ Pi-specific files are the write targets for imported or shared global servers wh
 - **`eager`** — Connect at startup but don't auto-reconnect if the connection drops. No idle timeout by default (set `idleTimeout` explicitly to enable).
 - **`keep-alive`** — Connect at startup. Auto-reconnect via health checks. No idle timeout. Use for servers you always need available.
 
-Config scope and runtime ownership are independent. A user-global definition makes a server available to every Pi session, but each session still owns its connection; a stdio definition therefore starts one process per connected session. Prefer an official Streamable HTTP endpoint for globally used hosted services, and keep stdio servers `lazy` unless every session genuinely needs its own process.
+Config scope and runtime ownership are independent. A user-global definition makes a server available to every Pi session, but stdio processes remain session-owned by default. Prefer an official Streamable HTTP endpoint for globally used hosted services.
+
+For a stateless local stdio server that is safe to multiplex, opt into one process shared across Pi sessions:
+
+```json
+{
+  "mcpServers": {
+    "docs": {
+      "command": "node",
+      "args": ["./docs-server.js"],
+      "runtime": "global",
+      "lifecycle": "lazy"
+    }
+  }
+}
+```
+
+`"project"` shares within the effective server working directory; `"global"` shares across all Pi sessions with the same resolved definition. Both use an authenticated loopback broker. Concurrent clients receive independent JSON-RPC request IDs, initialization is replayed safely, progress is routed to its caller, dead brokers are replaced, and the process exits after its final client disconnects. Use project/global scope only for stateless servers: browser/editor/filesystem session state must remain `"session"`. Sampling and other server-to-client requests are intentionally unavailable outside session scope because they cannot be attributed safely across agents.
+
+The `/mcp` panel cycles the same **Runtime scope** setting for stdio entries.
 
 ### Settings
 
@@ -370,6 +390,6 @@ In interactive sessions, you can also authenticate from `/mcp` with `ctrl+a` or 
 
 ## Limitations
 
-- Cross-session server sharing not yet implemented (each Pi session runs its own server processes)
+- Project/global runtime scopes are opt-in for stateless stdio servers; session state and server-to-client requests remain session-owned.
 - Compact MCP result rendering summarizes text, but inline images are still controlled by Pi's image display settings and may render below the compact text summary.
 - MCP sampling support is text-only; context inclusion, tools, stop sequences, audio, and image content are rejected with explicit errors.

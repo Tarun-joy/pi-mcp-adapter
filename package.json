@@ -53,6 +53,8 @@
     "ui-stream-types.ts",
     "config.ts",
     "server-manager.ts",
+    "shared-stdio-transport.ts",
+    "shared-stdio-broker.js",
     "sampling-handler.ts",
     "tool-registrar.ts",
     "tool-result-renderer.ts",
