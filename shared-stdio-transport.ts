@@ -9,7 +9,7 @@ import type { Transport, TransportSendOptions } from "@modelcontextprotocol/sdk/
 import { getAgentPath } from "./agent-dir.ts";
 
 const BROKER_PROTOCOL = 1;
-const START_TIMEOUT_MS = 10_000;
+const START_TIMEOUT_MS = 30_000;
 const BROKER_IDLE_MS = 30_000;
 
 interface BrokerInfo {
