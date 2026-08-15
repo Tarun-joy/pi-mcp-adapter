@@ -241,6 +241,7 @@ describe("McpOAuthProvider", () => {
         onRedirect: async (url) => {
           redirectCaptured = url
         },
+        canRedirectToAuthorization: true,
       })
       await updateOAuthState("redirect-with-state", "state-abc", serverUrl)
       const testUrl = new URL("https://example.com/auth")
@@ -267,6 +268,7 @@ describe("McpOAuthProvider", () => {
         onRedirect: async () => {
           redirected = true
         },
+        canRedirectToAuthorization: true,
       })
       saveAuthEntry("redirect-url-bound", {
         oauthState: "stale-state",
@@ -325,6 +327,7 @@ describe("McpOAuthProvider", () => {
     it("should save and retrieve state", async () => {
       const provider = new McpOAuthProvider("state-test-save", serverUrl, {}, {
         onRedirect: async () => {},
+        canRedirectToAuthorization: true,
       })
 
       await provider.saveState("state-xyz-789")
@@ -348,6 +351,7 @@ describe("McpOAuthProvider", () => {
     it("should ignore OAuth state saved for a different server URL", async () => {
       const provider = new McpOAuthProvider("state-url-bound", serverUrl, {}, {
         onRedirect: async () => {},
+        canRedirectToAuthorization: true,
       })
       saveAuthEntry("state-url-bound", {
         oauthState: "stale-state",
