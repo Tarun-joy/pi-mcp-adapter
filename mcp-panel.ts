@@ -435,8 +435,9 @@ class Panel {
     const start = Math.max(0, Math.min(this.cursor - 6, this.items.length - 12));
     const end = Math.min(this.items.length, start + 12);
     for (let i = start; i < end; i++) {
-      const label = this.itemLabel(this.items[i]!);
-      out.push(row(i === this.cursor ? this.selectedLabel(label) : label));
+      const item = this.items[i]!;
+      const label = this.itemLabel(item);
+      out.push(row(i === this.cursor ? this.selectedLabel(label, item) : label));
     }
     const direct = this.servers.reduce((n, s) => n + s.tools.filter(t => t.direct).length, 0);
     const toks = this.servers.reduce((n, s) => n + s.tools.filter(t => t.direct).reduce((a, t) => a + t.tokens, 0), 0);
@@ -449,8 +450,9 @@ class Panel {
     return this.opts.selectedText?.(text) ?? color("36", text);
   }
 
-  private selectedLabel(label: string) {
-    return this.selected(`› ${stripAnsi(label)}`);
+  private selectedLabel(label: string, item: Item) {
+    const text = stripAnsi(label);
+    return this.selected(item.type === "server" ? text : `› ${text}`);
   }
 
   private scopeLabel(server: ServerState) {
