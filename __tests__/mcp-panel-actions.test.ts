@@ -51,7 +51,7 @@ describe("mcp-panel server actions", () => {
     const output = stripAnsi(panel.render(100).join("\n"));
     expect(output).toContain("Authenticate");
     expect(output).toContain("Re-authenticate");
-    expect(output).toContain("Reconnect / refresh tools");
+    expect(output).toContain("Refresh in current session — connected (1 tools)");
     expect(output).toContain("Clear cached tools");
     expect(output).toContain("Keep connected after reload");
     panel.dispose();
@@ -68,7 +68,7 @@ describe("mcp-panel server actions", () => {
 
     const output = stripAnsi(panel.render(100).join("\n"));
     expect(output).toContain("Connection status: not connected");
-    expect(output).toContain("Connect for this session / refresh tools");
+    expect(output).toContain("Refresh in current session — not connected");
     expect(output).not.toContain("Authenticate");
     expect(output).not.toContain("Re-authenticate");
     panel.dispose();
@@ -141,7 +141,7 @@ describe("mcp-panel server actions", () => {
 
     const output = stripAnsi(panel.render(100).join("\n"));
     expect(output).toContain("notionApi");
-    expect(output).toContain("Connect for this session / refresh tools");
+    expect(output).toContain("Refresh in current session — not connected");
     expect(output).not.toContain("Authenticate");
     expect(output).not.toContain("MCP panel error");
     panel.dispose();
@@ -219,6 +219,22 @@ describe("mcp-panel server actions", () => {
       "user",
     );
     expect(done).toHaveBeenCalledWith(expect.objectContaining({ cancelled: false, addedServer: "demo" }));
+    panel.dispose();
+  });
+
+  it("refreshes the MCP and reports its current session state", async () => {
+    const cfg = config();
+    const cbs = callbacks();
+    const panel = createMcpPanel(cfg, cache(cfg), new Map(), cbs, { requestRender: () => {} }, () => {});
+
+    panel.handleInput("\r");
+    down(panel, 4);
+    panel.handleInput("\r");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(cbs.reconnect).toHaveBeenCalledWith("github");
+    expect(stripAnsi(panel.render(100).join("\n"))).toContain("github: refreshed in current session — connected (1 tools)");
     panel.dispose();
   });
 
