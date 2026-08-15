@@ -154,10 +154,14 @@ describe("mcp-panel server actions", () => {
     ]);
     const panel = createMcpPanel(cfg, cache(cfg), provenance, callbacks(), { requestRender: () => {} }, () => {});
 
-    expect(stripAnsi(panel.render(100).join("\n"))).toContain("github (project, session, 1 tools)");
+    const collapsed = stripAnsi(panel.render(100).join("\n"));
+    expect(collapsed).toContain("github (project, session, 1 tools)");
+    expect(collapsed).not.toContain("› ▸");
 
     panel.handleInput("\r");
-    expect(stripAnsi(panel.render(140).join("\n"))).toContain("github (project, session, 1 tools · /repo/.mcp.json)");
+    const expanded = stripAnsi(panel.render(140).join("\n"));
+    expect(expanded).toContain("github (project, session, 1 tools · /repo/.mcp.json)");
+    expect(expanded).not.toContain("› ▾");
     panel.dispose();
   });
 
