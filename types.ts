@@ -296,10 +296,10 @@ export interface ServerEntry {
   oauth?: OAuthConfig | false;
   lifecycle?: "keep-alive" | "lazy" | "eager";
   /**
-   * Process ownership for stdio servers. Shared runtimes multiplex one stateless
-   * server process across Pi sessions. HTTP servers always use session clients.
+   * Process scope for stdio servers. Project/global runtimes multiplex one
+   * stateless server process across Pi sessions. HTTP servers use session clients.
    */
-  runtime?: "session" | "shared";
+  runtime?: "session" | "project" | "global";
   idleTimeout?: number; // minutes, overrides global setting
   // Resource handling
   exposeResources?: boolean;
@@ -384,6 +384,7 @@ export interface McpPanelCallbacks {
 export interface McpPanelResult {
   changes: Map<string, true | string[] | false>;
   lifecycleChanges?: Map<string, "lazy" | "eager" | "keep-alive">;
+  runtimeChanges?: Map<string, "session" | "project" | "global">;
   cancelled: boolean;
   addedServer?: string;
 }

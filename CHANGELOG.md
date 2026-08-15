@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added explicit `runtime: "project" | "global"` scopes for multiplexing stateless local stdio servers across Pi sessions, including authenticated broker startup, request/progress routing, crash recovery, idle cleanup, and `/mcp` configuration.
+
 ### Fixed
 - Started OAuth callback listeners only during interactive authentication and stopped them after the last local flow, avoiding one persistent callback port per Pi process.
 - Serialized interactive OAuth per server across Pi processes so concurrent sessions cannot replace state, client registration, or PKCE data during token exchange.

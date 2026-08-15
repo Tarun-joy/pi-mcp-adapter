@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -78,7 +79,7 @@ export class McpServerManager {
     name: string,
     definition: ServerDefinition
   ): Promise<ServerConnection> {
-    const sharedRuntime = definition.command !== undefined && definition.runtime === "shared";
+    const sharedRuntime = definition.command !== undefined && definition.runtime !== undefined && definition.runtime !== "session";
     const client = this.createClient(name, sharedRuntime);
     
     let transport: Transport;
@@ -96,17 +97,20 @@ export class McpServerManager {
         }
       }
 
+      const configuredCwd = resolveConfigPath(definition.cwd);
+      const runtimeCwd = definition.runtime === "project" ? configuredCwd ?? process.cwd() : configuredCwd;
       const stdioDefinition = {
         command,
         args,
         env: resolveEnv(definition.env),
-        cwd: resolveConfigPath(definition.cwd),
+        cwd: runtimeCwd,
         stderr: definition.debug ? "inherit" as const : "ignore" as const,
       };
+      const runtimeIdentity = computeSharedRuntimeIdentity(definition);
       transport = sharedRuntime
         ? new SharedStdioClientTransport({
             serverName: name,
-            definitionHash: computeServerHash(definition),
+            definitionHash: runtimeIdentity,
             definition: stdioDefinition,
           })
         : new StdioClientTransport(stdioDefinition);
@@ -379,6 +383,14 @@ export class McpServerManager {
     if (connection.inFlight > 0) return false;
     return (Date.now() - connection.lastUsedAt) > timeoutMs;
   }
+}
+
+export function computeSharedRuntimeIdentity(definition: ServerDefinition, sessionCwd = process.cwd()): string {
+  const configuredCwd = resolveConfigPath(definition.cwd);
+  const scopeCwd = definition.runtime === "project" ? configuredCwd ?? sessionCwd : "";
+  return createHash("sha256")
+    .update(`${computeServerHash(definition)}:${definition.runtime ?? "session"}:${scopeCwd}`)
+    .digest("hex");
 }
 
 /**

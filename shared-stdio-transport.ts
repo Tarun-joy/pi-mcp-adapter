@@ -149,12 +149,18 @@ async function waitForBroker(infoPath: string, options: SharedStdioTransportOpti
 async function openSharedSocket(options: SharedStdioTransportOptions): Promise<Socket> {
   const { infoPath, lockPath } = pathsFor(options.definitionHash);
   const current = readInfo(infoPath, options.definitionHash);
-  if (current) return connectAndHandshake(current, options);
+  if (current) {
+    try { return await connectAndHandshake(current, options); }
+    catch { rmSync(infoPath, { force: true }); }
+  }
 
   const release = await acquireStartupLock(lockPath);
   try {
     const afterLock = readInfo(infoPath, options.definitionHash);
-    if (afterLock) return connectAndHandshake(afterLock, options);
+    if (afterLock) {
+      try { return await connectAndHandshake(afterLock, options); }
+      catch { rmSync(infoPath, { force: true }); }
+    }
     rmSync(infoPath, { force: true });
     const brokerPath = fileURLToPath(new URL("./shared-stdio-broker.js", import.meta.url));
     const child = spawn(process.execPath, [brokerPath, infoPath, options.definitionHash, String(options.idleMs ?? BROKER_IDLE_MS)], {

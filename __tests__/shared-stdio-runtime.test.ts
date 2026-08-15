@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { SharedStdioClientTransport } from "../shared-stdio-transport.ts";
+import { computeSharedRuntimeIdentity, McpServerManager } from "../server-manager.ts";
 
 const fixture = resolve(import.meta.dirname, "fixtures/shared-stdio-server.mjs");
 const clients: Client[] = [];
+const managers: McpServerManager[] = [];
 let runtimeDir: string;
 
 function options(hash: string) {
@@ -54,6 +56,7 @@ describe("shared stdio runtime", () => {
 
   afterEach(async () => {
     await Promise.all(clients.splice(0).map(client => client.close().catch(() => {})));
+    await Promise.all(managers.splice(0).map(manager => manager.closeAll().catch(() => {})));
     for (const file of readdirSync(runtimeDir).filter(name => name.endsWith(".json"))) {
       try {
         const info = JSON.parse(readFileSync(join(runtimeDir, file), "utf8")) as { pid?: number };
@@ -62,6 +65,36 @@ describe("shared stdio runtime", () => {
     }
     delete process.env.MCP_SHARED_RUNTIME_DIR;
     rmSync(runtimeDir, { recursive: true, force: true });
+  });
+
+  it("keys project runtimes by cwd and global runtimes only by definition", () => {
+    const definition = { command: "node", args: ["server.js"] };
+    expect(computeSharedRuntimeIdentity({ ...definition, runtime: "project" }, "/repo/a"))
+      .not.toBe(computeSharedRuntimeIdentity({ ...definition, runtime: "project" }, "/repo/b"));
+    expect(computeSharedRuntimeIdentity({ ...definition, runtime: "global" }, "/repo/a"))
+      .toBe(computeSharedRuntimeIdentity({ ...definition, runtime: "global" }, "/repo/b"));
+  });
+
+  it("uses shared transport through the server manager", async () => {
+    const definition = { command: process.execPath, args: [fixture], runtime: "global" as const };
+    const firstManager = new McpServerManager();
+    const secondManager = new McpServerManager();
+    managers.push(firstManager, secondManager);
+
+    const [first, second] = await Promise.all([
+      firstManager.connect("fixture", definition),
+      secondManager.connect("fixture", definition),
+    ]);
+    const [one, two] = await Promise.all([
+      first.client.callTool({ name: "identity", arguments: {} }),
+      second.client.callTool({ name: "identity", arguments: {} }),
+    ]);
+    const parse = (result: typeof one) => {
+      const block = result.content[0];
+      if (!block || block.type !== "text") throw new Error("Fixture returned no identity");
+      return JSON.parse(block.text) as { pid: number };
+    };
+    expect(parse(one).pid).toBe(parse(two).pid);
   });
 
   it("multiplexes concurrent clients through one upstream process", async () => {
@@ -81,6 +114,20 @@ describe("shared stdio runtime", () => {
 
     await second.close();
     await waitFor(() => readdirSync(runtimeDir).filter(name => name.endsWith(".json")).length === 0);
+  });
+
+  it("replaces stale broker metadata even when its pid was reused", async () => {
+    const hash = "c".repeat(64);
+    writeFileSync(join(runtimeDir, `${hash.slice(0, 24)}.json`), JSON.stringify({
+      protocol: 1,
+      pid: process.pid,
+      port: 1,
+      token: "stale",
+      definitionHash: hash,
+    }));
+
+    const client = await connect(hash);
+    await expect(identity(client)).resolves.toMatchObject({ calls: 1 });
   });
 
   it("recovers from a broker killed without cleanup", async () => {
