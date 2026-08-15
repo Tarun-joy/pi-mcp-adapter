@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -97,8 +99,7 @@ export class McpServerManager {
         }
       }
 
-      const configuredCwd = resolveConfigPath(definition.cwd);
-      const runtimeCwd = definition.runtime === "project" ? configuredCwd ?? process.cwd() : configuredCwd;
+      const runtimeCwd = resolveSharedRuntimeCwd(definition);
       const stdioDefinition = {
         command,
         args,
@@ -385,9 +386,20 @@ export class McpServerManager {
   }
 }
 
-export function computeSharedRuntimeIdentity(definition: ServerDefinition, sessionCwd = process.cwd()): string {
+function canonicalizeCwd(cwd: string): string {
+  const absolute = resolve(cwd);
+  try { return realpathSync.native(absolute); }
+  catch { return absolute; }
+}
+
+export function resolveSharedRuntimeCwd(definition: ServerDefinition, sessionCwd = process.cwd()): string | undefined {
   const configuredCwd = resolveConfigPath(definition.cwd);
-  const scopeCwd = definition.runtime === "project" ? configuredCwd ?? sessionCwd : "";
+  if (definition.runtime === "project") return canonicalizeCwd(configuredCwd ?? sessionCwd);
+  return configuredCwd;
+}
+
+export function computeSharedRuntimeIdentity(definition: ServerDefinition, sessionCwd = process.cwd()): string {
+  const scopeCwd = definition.runtime === "project" ? resolveSharedRuntimeCwd(definition, sessionCwd) : "";
   return createHash("sha256")
     .update(`${computeServerHash(definition)}:${definition.runtime ?? "session"}:${scopeCwd}`)
     .digest("hex");
