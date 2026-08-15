@@ -56,9 +56,12 @@ export class McpLifecycleManager {
     for (const [name, definition] of this.keepAliveServers) {
       const connection = this.manager.getConnection(name);
       
+      if (connection?.status === "needs-auth") continue;
+
       if (!connection || connection.status !== "connected") {
         try {
-          await this.manager.connect(name, definition);
+          const reconnected = await this.manager.connect(name, definition);
+          if (reconnected.status !== "connected") continue;
           logger.debug(`Reconnected to ${name}`);
           // Notify extension to update metadata
           this.onReconnect?.(name);

@@ -30,6 +30,11 @@ interface ServerConnection {
   status: "connected" | "closed" | "needs-auth";
 }
 
+interface HttpTransportResolution {
+  transport: Transport;
+  needsAuth: boolean;
+}
+
 type UiStreamListener = (serverName: string, notification: ServerStreamResultPatchNotification["params"]) => void;
 
 export class McpServerManager {
@@ -97,7 +102,11 @@ export class McpServerManager {
       });
     } else if (definition.url) {
       // HTTP transport with fallback
-      transport = await this.createHttpTransport(definition, name);
+      const resolution = await this.createHttpTransport(definition, name);
+      transport = resolution.transport;
+      if (resolution.needsAuth) {
+        return this.createNeedsAuthConnection(client, transport, definition);
+      }
     } else {
       throw new Error(`Server ${name} has no command or url`);
     }
@@ -125,20 +134,7 @@ export class McpServerManager {
     } catch (error) {
       // Check for UnauthorizedError - server requires OAuth
       if (error instanceof UnauthorizedError && supportsOAuth(definition)) {
-        // Clean up both client and transport before reporting needs-auth.
-        await client.close().catch(() => {});
-        await transport.close().catch(() => {});
-
-        return {
-          client,
-          transport,
-          definition,
-          tools: [],
-          resources: [],
-          lastUsedAt: Date.now(),
-          inFlight: 0,
-          status: "needs-auth",
-        };
+        return this.createNeedsAuthConnection(client, transport, definition);
       }
       
       // Clean up both client and transport on any error
@@ -148,6 +144,25 @@ export class McpServerManager {
     }
   }
   
+  private async createNeedsAuthConnection(
+    client: Client,
+    transport: Transport,
+    definition: ServerDefinition,
+  ): Promise<ServerConnection> {
+    await client.close().catch(() => {});
+    await transport.close().catch(() => {});
+    return {
+      client,
+      transport,
+      definition,
+      tools: [],
+      resources: [],
+      lastUsedAt: Date.now(),
+      inFlight: 0,
+      status: "needs-auth",
+    };
+  }
+
   private createClient(serverName: string): Client {
     const client = new Client(
       { name: `pi-mcp-${serverName}`, version: "1.0.0" },
@@ -162,7 +177,7 @@ export class McpServerManager {
   private async createHttpTransport(
     definition: ServerDefinition, 
     serverName: string
-  ): Promise<Transport> {
+  ): Promise<HttpTransportResolution> {
     const url = new URL(definition.url!);
     
     // Build headers first (including any bearer token)
@@ -216,18 +231,24 @@ export class McpServerManager {
       await streamableTransport.close().catch(() => {});
       
       // StreamableHTTP works - create fresh transport for actual use
-      return new StreamableHTTPClientTransport(url, { requestInit, authProvider });
+      return {
+        transport: new StreamableHTTPClientTransport(url, { requestInit, authProvider }),
+        needsAuth: false,
+      };
     } catch (error) {
       // StreamableHTTP failed, close and try SSE fallback
       await streamableTransport.close().catch(() => {});
       
-      // If this was an UnauthorizedError, don't try SSE - the server needs auth
+      // Preserve OAuth as connection state instead of leaking a probe exception.
       if (error instanceof UnauthorizedError) {
-        throw error;
+        return { transport: streamableTransport, needsAuth: true };
       }
       
       // SSE is the legacy transport
-      return new SSEClientTransport(url, { requestInit, authProvider });
+      return {
+        transport: new SSEClientTransport(url, { requestInit, authProvider }),
+        needsAuth: false,
+      };
     }
   }
   
