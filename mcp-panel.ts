@@ -326,7 +326,7 @@ class Panel {
       try { entry = this.callbacks.refreshCacheAfterReconnect(server.name); }
       catch (e) { this.notice = `${server.name}: ${msg(e)}`; server.status = "failed"; this.requestRender(); return; }
       if (entry) this.rebuildTools(server, entry);
-      server.cached = !!entry; this.notice = `${server.name}: ${this.statusText(server)}`; this.requestRender();
+      server.cached = !!entry; this.notice = `${server.name}: refreshed in current session — ${this.statusText(server)}`; this.requestRender();
     }).catch(e => { server.status = "failed"; this.notice = `${server.name}: ${msg(e)}`; this.requestRender(); });
   }
   private toggleRuntime(server: ServerState) {
@@ -472,7 +472,7 @@ class Panel {
     const s = item.type === "server" ? this.servers[item.s]! : this.servers[item.s]!;
     if (item.type === "server") return `${s.expanded ? "▾" : "▸"} ${s.status === "connected" ? color("32", "●") : s.status === "needs-auth" ? color("33", "●") : "○"} ${s.name} ${color("2", `(${this.scopeDetails(s)})`)}`;
     if (item.type === "tool") { const t = s.tools[item.t]!; return `    ${t.direct ? color("32", "✓") : color("2", "○")} ${oneLine(t.name)}${t.description ? color("2", " — " + oneLine(t.description)) : ""}`; }
-    const labels: Record<Action, string> = { status: `Connection status: ${this.statusText(s)}`, authenticate: "Authenticate", reauthenticate: "Re-authenticate", refresh: `${s.status === "connected" ? "Reconnect" : "Connect for this session"} / refresh tools`, "clear-cache": "Clear cached tools", runtime: `Runtime scope: ${s.runtime}`, lifecycle: `Keep connected after reload: ${s.lifecycle === "keep-alive" ? "on" : "off"}`, tools: `${s.toolsOpen ? "Hide" : "Show"} tools` };
+    const labels: Record<Action, string> = { status: `Connection status: ${this.statusText(s)}`, authenticate: "Authenticate", reauthenticate: "Re-authenticate", refresh: `Refresh in current session — ${this.statusText(s)}`, "clear-cache": "Clear cached tools", runtime: `Runtime scope: ${s.runtime}`, lifecycle: `Keep connected after reload: ${s.lifecycle === "keep-alive" ? "on" : "off"}`, tools: `${s.toolsOpen ? "Hide" : "Show"} tools` };
     const disabled = (item.action === "authenticate" || item.action === "reauthenticate") && !this.safeCanAuthenticate(s);
     return "  • " + (disabled ? color("2", labels[item.action]) : labels[item.action]);
   }
