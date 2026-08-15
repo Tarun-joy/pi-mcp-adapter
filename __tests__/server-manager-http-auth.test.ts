@@ -56,7 +56,7 @@ vi.mock("../npx-resolver.ts", () => ({
   resolveNpxBinary: vi.fn(async () => null),
 }));
 
-describe("McpServerManager HTTP bearer auth", () => {
+describe("McpServerManager HTTP auth", () => {
   const originalEnv = {
     MCP_TEST_BEARER_TOKEN: process.env.MCP_TEST_BEARER_TOKEN,
     MCP_TEST_BEARER_TOKEN_ENV: process.env.MCP_TEST_BEARER_TOKEN_ENV,

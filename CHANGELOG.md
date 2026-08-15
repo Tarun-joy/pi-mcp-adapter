@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Isolated interactive OAuth state from background reconnect providers so keep-alive probes cannot overwrite an in-flight PKCE verifier.
+- Preserved OAuth authorization failures as `needs-auth` connection state and stopped keep-alive retry storms while user action is required.
+- Reconnected OAuth servers immediately after interactive authentication so the MCP panel reflects the new credentials without a second action.
+
 ## [2.6.1] - 2026-05-13
 
 ### Added
