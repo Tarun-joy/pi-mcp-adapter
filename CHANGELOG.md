@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Started OAuth callback listeners only during interactive authentication and stopped them after the last local flow, avoiding one persistent callback port per Pi process.
 - Serialized interactive OAuth per server across Pi processes so concurrent sessions cannot replace state, client registration, or PKCE data during token exchange.
 - Allowed blocked server rows to expand in the MCP panel so Authenticate and Re-authenticate remain explicitly selectable.
 - Isolated interactive OAuth state from background reconnect providers so keep-alive probes cannot overwrite an in-flight PKCE verifier.
