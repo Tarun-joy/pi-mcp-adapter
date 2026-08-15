@@ -228,6 +228,7 @@ describe("mcpAdapter session lifecycle", () => {
 
     await sessionStart?.({}, {});
     expect(mocks.initializeMcp).toHaveBeenCalledTimes(1);
+    expect(mocks.initializeOAuth).not.toHaveBeenCalled();
     expect(mocks.shutdownOAuth).toHaveBeenCalledTimes(1);
 
     await sessionStart?.({}, {});
