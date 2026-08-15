@@ -141,12 +141,13 @@ export async function reconnectServers(
 
 export async function authenticateServer(
   serverName: string,
-  config: McpConfig,
-  ctx: ExtensionContext
+  state: McpExtensionState,
+  ctx: ExtensionContext,
+  authenticateFn: typeof authenticate = authenticate,
 ): Promise<McpAuthResult> {
   if (!ctx.hasUI) return { ok: false, message: "OAuth authentication requires an interactive session." };
 
-  const definition = config.mcpServers[serverName];
+  const definition = state.config.mcpServers[serverName];
   if (!definition) {
     const message = `Server "${serverName}" not found in config`;
     ctx.ui.notify(message, "error");
@@ -171,15 +172,18 @@ export async function authenticateServer(
 
   try {
     ctx.ui.setStatus("mcp-auth", `Authenticating ${serverName}...`);
-    const status = await authenticate(serverName, definition.url, definition);
+    const status = await authenticateFn(serverName, definition.url, definition);
 
     if (status === "authenticated") {
-      const message = `OAuth authentication successful for "${serverName}"! Run /mcp reconnect ${serverName} to connect with the new token.`;
-      ctx.ui.notify(
-        `OAuth authentication successful for "${serverName}"!\n` +
-        `Run /mcp reconnect ${serverName} to connect with the new token.`,
-        "info"
-      );
+      await reconnectServers(state, ctx, serverName);
+      if (state.manager.getConnection(serverName)?.status !== "connected") {
+        const message = `OAuth authentication succeeded for "${serverName}", but reconnecting failed.`;
+        ctx.ui.notify(message, "warning");
+        return { ok: false, message };
+      }
+
+      const message = `OAuth authentication successful for "${serverName}" and the server is connected.`;
+      ctx.ui.notify(message, "info");
       return { ok: true, message };
     }
 
@@ -223,7 +227,7 @@ export async function reauthenticateServer(
 ): Promise<McpAuthResult> {
   const cleared = await logoutServer(serverName, state, ctx);
   if (!cleared.ok) return { ok: false, message: cleared.message };
-  return authenticateServer(serverName, state.config, ctx);
+  return authenticateServer(serverName, state, ctx);
 }
 
 export async function clearServerCache(
@@ -355,7 +359,7 @@ function buildMcpPanelCallbacks(
       const definition = config.mcpServers[serverName];
       return definition ? supportsOAuth(definition) : false;
     },
-    authenticate: (serverName: string) => authenticateServer(serverName, config, ctx),
+    authenticate: (serverName: string) => authenticateServer(serverName, state, ctx),
     reauthenticate: (serverName: string) => reauthenticateServer(serverName, state, ctx),
     clearServerCache: (serverName: string) => clearServerCache(serverName, state, ctx),
     addServer: async (serverName: string, entry: ServerEntry, scope: "user" | "project") => {

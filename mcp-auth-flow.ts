@@ -108,6 +108,7 @@ export async function startAuth(
     onRedirect: async (url) => {
       capturedUrl = url
     },
+    canRedirectToAuthorization: true,
   })
 
   try {

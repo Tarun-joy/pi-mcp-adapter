@@ -1,3 +1,4 @@
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type TransportOptions = {
@@ -15,6 +16,7 @@ type HttpTransportMock = {
 
 const mocks = vi.hoisted(() => ({
   httpTransports: [] as HttpTransportMock[],
+  nextConnectError: undefined as Error | undefined,
 }));
 
 vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
@@ -23,7 +25,11 @@ vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
     options,
     setRequestHandler: vi.fn(),
     setNotificationHandler: vi.fn(),
-    connect: vi.fn(async () => undefined),
+    connect: vi.fn(async () => {
+      const error = mocks.nextConnectError;
+      mocks.nextConnectError = undefined;
+      if (error) throw error;
+    }),
     listTools: vi.fn(async () => ({ tools: [] })),
     listResources: vi.fn(async () => ({ resources: [] })),
     close: vi.fn(async () => undefined),
@@ -50,7 +56,7 @@ vi.mock("../npx-resolver.ts", () => ({
   resolveNpxBinary: vi.fn(async () => null),
 }));
 
-describe("McpServerManager HTTP bearer auth", () => {
+describe("McpServerManager HTTP auth", () => {
   const originalEnv = {
     MCP_TEST_BEARER_TOKEN: process.env.MCP_TEST_BEARER_TOKEN,
     MCP_TEST_BEARER_TOKEN_ENV: process.env.MCP_TEST_BEARER_TOKEN_ENV,
@@ -58,6 +64,7 @@ describe("McpServerManager HTTP bearer auth", () => {
 
   beforeEach(() => {
     mocks.httpTransports.length = 0;
+    mocks.nextConnectError = undefined;
   });
 
   afterEach(() => {
@@ -110,5 +117,19 @@ describe("McpServerManager HTTP bearer auth", () => {
     });
 
     expect(mocks.httpTransports.at(-1)!.options.requestInit?.headers?.Authorization).toBe("Bearer named-env-token");
+  });
+
+  it("maps OAuth rejection during the HTTP probe to needs-auth state", async () => {
+    const { McpServerManager } = await import("../server-manager.ts");
+    mocks.nextConnectError = new UnauthorizedError("Unauthorized");
+
+    const manager = new McpServerManager();
+    const connection = await manager.connect("oauth", {
+      url: "https://example.test/mcp",
+      auth: "oauth",
+    });
+
+    expect(connection.status).toBe("needs-auth");
+    expect(mocks.httpTransports).toHaveLength(1);
   });
 });

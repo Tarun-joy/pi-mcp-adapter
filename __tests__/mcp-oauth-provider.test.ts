@@ -45,7 +45,7 @@ describe("McpOAuthProvider authorization fallback", () => {
     expect(redirected).toBe(false);
   });
 
-  it("still redirects when startAuth has seeded OAuth state", async () => {
+  it("still redirects when startAuth owns the seeded OAuth state", async () => {
     const authUrl = new URL("https://auth.example.com/authorize");
     let redirected: URL | undefined;
     updateOAuthState("redirect-active", "state-abc", serverUrl);
@@ -53,11 +53,23 @@ describe("McpOAuthProvider authorization fallback", () => {
       onRedirect: async (url) => {
         redirected = url;
       },
+      canRedirectToAuthorization: true,
     });
 
     await provider.redirectToAuthorization(authUrl);
 
     expect(redirected).toBe(authUrl);
+  });
+
+  it("does not let a background reconnect reuse an active flow's state", async () => {
+    updateOAuthState("redirect-background", "state-abc", serverUrl);
+    const provider = new McpOAuthProvider("redirect-background", serverUrl, {}, {
+      onRedirect: async () => {},
+    });
+
+    await expect(provider.state()).rejects.toBeInstanceOf(UnauthorizedError);
+    await expect(provider.redirectToAuthorization(new URL("https://auth.example.com/authorize")))
+      .rejects.toBeInstanceOf(UnauthorizedError);
   });
 
   it("throws before redirecting when only stale URL-bound state exists", async () => {

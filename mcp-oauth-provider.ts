@@ -64,6 +64,7 @@ export interface McpOAuthConfig {
 /** Callbacks for OAuth flow interactions */
 export interface McpOAuthCallbacks {
   onRedirect: (url: URL) => void | Promise<void>
+  canRedirectToAuthorization?: boolean
 }
 
 /**
@@ -210,9 +211,10 @@ export class McpOAuthProvider implements OAuthClientProvider {
     if (this.usesClientCredentials) {
       throw new Error("redirectToAuthorization is not used for client_credentials flow")
     }
-    // No saved oauthState means we're on the post-refresh authorize fallback.
+    // Only the provider created by startAuth owns the interactive flow. Background
+    // reconnect providers must not reuse its state or overwrite its PKCE verifier.
     const entry = await getAuthForUrl(this.serverName, this.serverUrl)
-    if (!entry?.oauthState) {
+    if (!this.callbacks.canRedirectToAuthorization || !entry?.oauthState) {
       throw new UnauthorizedError(
         `Re-authentication required for MCP server: ${this.serverName}`,
       )
@@ -259,7 +261,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
       throw new Error("state is not used for client_credentials flow")
     }
     const entry = await getAuthForUrl(this.serverName, this.serverUrl)
-    if (!entry?.oauthState) {
+    if (!this.callbacks.canRedirectToAuthorization || !entry?.oauthState) {
       throw new UnauthorizedError(
         `Re-authentication required for MCP server: ${this.serverName}`,
       )

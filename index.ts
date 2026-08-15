@@ -242,7 +242,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         return;
       }
 
-      await authenticateServer(serverName, state.config, ctx);
+      await authenticateServer(serverName, state, ctx);
     },
   });
 
