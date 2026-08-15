@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -7,6 +9,8 @@ import { SharedStdioClientTransport } from "../shared-stdio-transport.ts";
 import { computeSharedRuntimeIdentity, McpServerManager } from "../server-manager.ts";
 
 const fixture = resolve(import.meta.dirname, "fixtures/shared-stdio-server.mjs");
+const childFixture = resolve(import.meta.dirname, "fixtures/shared-stdio-client.mjs");
+const execFileAsync = promisify(execFile);
 const clients: Client[] = [];
 const managers: McpServerManager[] = [];
 let runtimeDir: string;
@@ -95,6 +99,20 @@ describe("shared stdio runtime", () => {
       return JSON.parse(block.text) as { pid: number };
     };
     expect(parse(one).pid).toBe(parse(two).pid);
+  });
+
+  it("multiplexes clients from separate Pi processes", async () => {
+    const hash = "d".repeat(64);
+    const run = async () => {
+      const { stdout } = await execFileAsync(process.execPath, ["--import", "tsx", childFixture, runtimeDir, hash, fixture], {
+        cwd: resolve(import.meta.dirname, ".."),
+        timeout: 10_000,
+      });
+      return JSON.parse(stdout.trim()) as { pid: number };
+    };
+
+    const [first, second] = await Promise.all([run(), run()]);
+    expect(first.pid).toBe(second.pid);
   });
 
   it("multiplexes concurrent clients through one upstream process", async () => {
