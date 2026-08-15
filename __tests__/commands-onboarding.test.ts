@@ -148,13 +148,50 @@ describe("commands onboarding", () => {
     } as any;
     const { authenticateServer } = await import("../commands.ts");
 
-    const result = await authenticateServer("huggingface", state, { hasUI: true, ui } as any, authenticate);
+    const result = await authenticateServer("huggingface", state, { hasUI: true, ui } as any, {}, authenticate);
 
     expect(result.ok).toBe(true);
+    expect(authenticate).toHaveBeenCalledWith(
+      "huggingface",
+      "https://example.com/mcp",
+      state.config.mcpServers.huggingface,
+      {},
+    );
     expect(manager.close).toHaveBeenCalledWith("huggingface");
     expect(manager.connect).toHaveBeenCalledWith("huggingface", state.config.mcpServers.huggingface);
     expect(manager.getConnection("huggingface")?.status).toBe("connected");
     expect(ui.notify).toHaveBeenCalledWith(expect.stringContaining("server is connected"), "info");
+  });
+
+  it("resets credentials inside the guarded reauthentication flow", async () => {
+    const authenticate = vi.fn(async () => "authenticated" as const);
+    const ui = createUi();
+    const connected = { status: "connected", tools: [], resources: [] };
+    let connection: typeof connected | undefined = { ...connected };
+    const manager = {
+      close: vi.fn(async () => { connection = undefined; }),
+      connect: vi.fn(async () => { connection = connected; return connected; }),
+      getConnection: vi.fn(() => connection),
+    };
+    const state = {
+      config: { mcpServers: { huggingface: { url: "https://example.com/mcp", auth: "oauth" } } },
+      manager,
+      toolMetadata: new Map(),
+      failureTracker: new Map(),
+    } as any;
+    const { reauthenticateServer } = await import("../commands.ts");
+
+    const result = await reauthenticateServer("huggingface", state, { hasUI: true, ui } as any, authenticate);
+
+    expect(result.ok).toBe(true);
+    expect(authenticate).toHaveBeenCalledWith(
+      "huggingface",
+      "https://example.com/mcp",
+      state.config.mcpServers.huggingface,
+      { resetCredentials: true },
+    );
+    expect(manager.close).toHaveBeenCalledWith("huggingface");
+    expect(manager.getConnection("huggingface")?.status).toBe("connected");
   });
 
   it("marks explicit OAuth servers as needs-auth when only stale URL tokens exist", async () => {

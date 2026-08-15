@@ -9,7 +9,8 @@
  * otherwise <Pi agent dir>/mcp-oauth/<server>/tokens.json
  */
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs';
+import { createHash, randomUUID } from 'crypto';
 import { join } from 'path';
 import { getAgentPath } from './agent-dir.ts';
 
@@ -38,6 +39,19 @@ export interface AuthEntry {
   serverUrl?: string; // Track the URL these credentials are for
 }
 
+export interface OAuthFlowLock {
+  path: string;
+  ownerId: string;
+}
+
+interface OAuthFlowLockRecord {
+  ownerId: string;
+  pid: number;
+  createdAt: number;
+}
+
+const OAUTH_FLOW_LOCK_STALE_MS = 10 * 60 * 1000;
+
 // Base directory for auth storage - can be overridden via env var for testing
 function getAuthBaseDir(): string {
   const override = process.env.MCP_OAUTH_DIR?.trim();
@@ -49,6 +63,77 @@ function getAuthBaseDir(): string {
  */
 function getServerDir(serverName: string): string {
   return join(getAuthBaseDir(), serverName);
+}
+
+function getOAuthFlowLockPath(serverName: string): string {
+  const lockDir = join(getAuthBaseDir(), '.locks');
+  mkdirSync(lockDir, { recursive: true, mode: 0o700 });
+  const key = createHash('sha256').update(serverName).digest('hex');
+  return join(lockDir, `${key}.json`);
+}
+
+function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+function readOAuthFlowLock(path: string): OAuthFlowLockRecord | undefined {
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8')) as OAuthFlowLockRecord;
+  } catch {
+    return undefined;
+  }
+}
+
+export function acquireOAuthFlowLock(serverName: string): OAuthFlowLock {
+  const path = getOAuthFlowLockPath(serverName);
+  const ownerId = randomUUID();
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = openSync(path, 'wx', 0o600);
+      try {
+        writeFileSync(fd, JSON.stringify({ ownerId, pid: process.pid, createdAt: Date.now() }));
+      } finally {
+        closeSync(fd);
+      }
+      return { path, ownerId };
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      if (nodeError.code !== 'EEXIST') throw error;
+
+      const existing = readOAuthFlowLock(path);
+      const isStale = !existing
+        || Date.now() - existing.createdAt > OAUTH_FLOW_LOCK_STALE_MS
+        || !isProcessAlive(existing.pid);
+      if (attempt === 0 && isStale) {
+        try {
+          unlinkSync(path);
+        } catch (unlinkError) {
+          if ((unlinkError as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkError;
+        }
+        continue;
+      }
+      throw new Error(`OAuth authentication is already in progress for MCP server: ${serverName}`);
+    }
+  }
+
+  throw new Error(`Could not acquire OAuth authentication lock for MCP server: ${serverName}`);
+}
+
+export function releaseOAuthFlowLock(lock: OAuthFlowLock): void {
+  const existing = readOAuthFlowLock(lock.path);
+  if (!existing || existing.ownerId !== lock.ownerId) return;
+  try {
+    unlinkSync(lock.path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
 }
 
 /**

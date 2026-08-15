@@ -45,7 +45,7 @@ function deferred<T>() {
 }
 
 describe("mcp-panel auth actions", () => {
-  it("authenticates a needs-auth server when pressing enter", async () => {
+  it("expands a needs-auth server so authentication actions remain selectable", async () => {
     const config: McpConfig = {
       mcpServers: {
         github: { url: "https://api.githubcopilot.com/mcp", auth: "oauth" },
@@ -58,9 +58,10 @@ describe("mcp-panel auth actions", () => {
     panel.handleInput("\r");
     await Promise.resolve();
 
-    expect(callbacks.authenticate).toHaveBeenCalledWith("github");
+    expect(callbacks.authenticate).not.toHaveBeenCalled();
     const output = stripAnsi(panel.render(100).join("\n"));
-    expect(output).toContain("OAuth finished for github");
+    expect(output).toContain("Authenticate");
+    expect(output).toContain("Re-authenticate");
     panel.dispose();
   });
 
@@ -90,7 +91,7 @@ describe("mcp-panel auth actions", () => {
     callbacks.authenticate = vi.fn(async () => ({ ok: false, message: "browser launch failed" }));
     const panel = createMcpPanel(config, createCache(config), new Map(), callbacks, { requestRender: () => {} }, () => {});
 
-    panel.handleInput("\r");
+    panel.handleInput("\x01");
     await Promise.resolve();
 
     const output = stripAnsi(panel.render(100).join("\n"));
@@ -109,8 +110,8 @@ describe("mcp-panel auth actions", () => {
     callbacks.authenticate = vi.fn(() => auth.promise);
     const panel = createMcpPanel(config, createCache(config), new Map(), callbacks, { requestRender: () => {} }, () => {});
 
-    panel.handleInput("\r");
-    panel.handleInput("\r");
+    panel.handleInput("\x01");
+    panel.handleInput("\x01");
     panel.handleInput("\x01");
 
     expect(callbacks.authenticate).toHaveBeenCalledTimes(1);
@@ -136,6 +137,24 @@ describe("mcp-panel auth actions", () => {
     expect(output).toContain("MCP OAuth");
     expect(output).toContain("github");
     expect(output).not.toContain("local");
+    panel.dispose();
+  });
+
+  it("authenticates the selected server with Enter in auth-only mode", async () => {
+    const config: McpConfig = {
+      mcpServers: {
+        github: { url: "https://api.githubcopilot.com/mcp", auth: "oauth" },
+      },
+    };
+    const callbacks = createCallbacks("needs-auth");
+    const panel = createMcpPanel(config, null, new Map(), callbacks, { requestRender: () => {} }, () => {}, {
+      authOnly: true,
+    });
+
+    panel.handleInput("\r");
+    await Promise.resolve();
+
+    expect(callbacks.authenticate).toHaveBeenCalledWith("github");
     panel.dispose();
   });
 

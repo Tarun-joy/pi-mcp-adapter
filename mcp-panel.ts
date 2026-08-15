@@ -250,7 +250,7 @@ class Panel {
     const server = this.servers[item.s]!;
     if (item.type === "server") {
       if (server.status === "connecting") return;
-      if (this.opts.authOnly || server.status === "needs-auth") return this.authenticate(server, false);
+      if (this.opts.authOnly) return this.authenticate(server, false);
       server.expanded = !server.expanded; server.toolsOpen = true; this.rebuild(); return;
     }
     if (item.type === "tool") { const tool = server.tools[item.t]; if (tool) this.notice = `${server.name}/${tool.name}: Space toggles direct, ctrl+s saves.`; return; }
